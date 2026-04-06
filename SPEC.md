@@ -1,104 +1,309 @@
-# VS Code Code Generation Prompt for `nats-agent-core`
+# nats-agent-core Specification
 
-```text
-Generate a production-grade Go library module named nats-agent-core that implements the following low-level design.
+## 1. Purpose
 
-GOALS
-- Provide a reusable shared library for NATS bus-facing behavior used by multiple long-running agents.
-- The library itself is not a daemon.
-- The library must be workload-agnostic and agent-agnostic.
-- Use Go with only standard library plus github.com/nats-io/nats.go and github.com/nats-io/nats.go/jetstream.
-- Use the newer jetstream package, not the legacy Conn.JetStream() API.
+`nats-agent-core` is a shared Go library for agents that communicate over a NATS bus.
 
-ARCHITECTURE
-- Public package name: agentcore
-- Internal packages:
-  - internal/contract
-  - internal/subjects
-  - internal/session
-  - internal/kv
-  - internal/transport
-  - internal/registry
-  - internal/observe
-  - internal/errors
+The library provides common bus-facing behavior for long-running agents, including:
+- NATS connection and reconnect handling
+- JetStream access
+- JetStream KV access for desired configuration
+- standard subject naming
+- standard message envelopes
+- configure and action submission helpers
+- result and status publication helpers
+- desired configuration storage and retrieval
+- handler registration and subscription restoration
 
-REQUIRED BEHAVIOR
-- Connect to configured NATS servers with daemon-friendly reconnect policy.
-- Build JetStream handle with jetstream.New(nc).
-- Bind or create a Key-Value bucket for desired config.
-- Expose Start(ctx), Close(ctx), Health().
-- Expose SubmitConfigure, SubmitAction, PublishResult, PublishStatus.
-- Expose StoreDesiredConfig, LoadDesiredConfig, LoadDesiredConfigRevision, WatchDesiredConfig, StartupReconcile.
-- Expose RegisterConfigureHandler, RegisterActionHandler, RegisterResultHandler, RegisterStatusHandler.
-- Maintain an in-memory subscription registry and restore subscriptions after reconnect.
-- Use json.RawMessage for workload payloads.
-- Implement transport-level validation only.
-- Return typed errors with error codes and retryability metadata.
-- Provide logger and metrics hooks.
+The library itself is **not a daemon**.
+It is intended to be embedded inside agent processes.
 
-WIRE CONTRACT
-- Configure desired state is authoritative in KV.
-- Configure submit sequence:
-  1. validate
-  2. store DesiredConfigRecord in KV
-  3. publish lightweight ConfigureNotification on cmd.configure.<target>
-- Action submit sequence:
-  1. validate
-  2. publish ActionCommand on cmd.action.<target>.<action>
-- Result/status are published on result.<target> and status.<target>.
+---
 
-DEFAULT SUBJECTS
-- cmd.configure.%s
-- cmd.action.%s.%s
-- result.%s
-- status.%s
-- health.%s
+## 2. Scope
 
-DEFAULT KV
-- bucket: cfg_desired
-- key pattern: desired.%s
+This library is intended to support agents such as:
+- cloud-facing / ucentral-side agent
+- host agent
+- VyOS agent
 
-PUBLIC TYPES TO IMPLEMENT
-- Config and nested configs
-- Client
-- BaseEnvelope
-- ConfigureCommand
-- DesiredConfigRecord
-- ConfigureNotification
-- ActionCommand
-- ResultEnvelope
-- StatusEnvelope
-- StoredDesiredConfig
-- SubmissionAck
-- HealthSnapshot
-- Logger interface
-- Metrics interface
-- typed Error with Code enum
+The library standardizes transport, message contract, and desired-state handling.
+It does **not** implement platform-specific business logic.
 
-CRITICAL CONSTRAINTS
-- Do not implement workload translation or local execution logic.
-- Do not implement reboot/script/trace/rtty logic.
-- Do not implement cloud business validation beyond shared envelope sanity validation.
-- Graceful shutdown must drain the NATS connection.
-- All networked public methods must accept context.Context.
-- Keep code modular, testable, and race-safe.
+---
 
-OUTPUT
-1. go.mod
-2. public package files under agentcore/
-3. internal package implementation
-4. unit tests
-5. integration tests with a real nats-server -js test instance
-6. example command-agent, host-agent, and vyos-agent usage programs
-7. README with quick-start instructions
+## 3. Non-goals
 
-CODING STANDARDS
-- Prefer explicit structs and small focused files.
-- Keep exported APIs documented.
-- Wrap errors with context.
-- Use mutexes carefully around mutable shared state.
-- Avoid global variables.
-- Keep handlers thin; assume long-running business work is handed off by the agent.
+The shared library must **not** implement:
+- workload-specific config translation
+- host reboot/script execution
+- trace, rtty, or other action business logic
+- cloud-side business validation beyond transport/message sanity checks
+- local apply/rollback engines
+- historical config management or rollback orchestration
 
-Now generate the project file-by-file, starting with go.mod and public API types.
-```
+These responsibilities belong to the consuming agents.
+
+---
+
+## 4. Architecture model
+
+The architecture is:
+
+- **library** = shared NATS/JetStream/KV contract and helper layer
+- **agent** = long-running process that owns local business logic
+
+Each agent embeds the library and uses it to:
+- connect to NATS
+- publish and subscribe on standard subjects
+- store and load desired configuration
+- publish results and status
+- recover subscriptions after reconnect
+
+---
+
+## 5. Desired configuration model
+
+### 5.1 Latest-state model
+
+This design uses a **UUID-based latest-state model**.
+
+JetStream KV is used as a **single latest desired-config slot** per target, not as a historical configuration store.
+
+The library stores only the current desired configuration for a target in KV.
+Agents always load the **current** desired configuration from KV.
+
+Rollback, revision-ordered history, and historical configuration lookup are out of scope for this design.
+
+### 5.2 Config identity semantics
+
+Each desired configuration carries a **config UUID** assigned by the cloud-facing side.
+
+The config UUID is:
+- an opaque identity token
+- used for equality comparison only
+- not an ordering field
+- not a version sequence
+- not a freshness indicator
+
+Agents determine whether they are in sync by comparing:
+- the UUID of the locally applied/running config
+- the UUID stored in the desired config record in KV
+
+If the UUIDs match, the running config is in sync with desired state.
+If the UUIDs differ, the running config is not in sync with desired state.
+
+### 5.3 rpc_id semantics
+
+`rpc_id` is used only for request/response correlation.
+
+It identifies which request produced a given result or status message.
+It does **not** identify which configuration instance is running or applied.
+
+---
+
+## 6. Configure contract
+
+### 6.1 Configure submit sequence
+
+Configure is modeled as **store desired state, then notify**:
+
+1. caller submits a validated configure request
+2. library stores the desired configuration record in KV
+3. library publishes a lightweight configure notification on the configure subject
+4. target agent receives the notification
+5. target agent loads the current desired config from KV
+6. target agent performs local apply logic
+7. target agent publishes configure result and/or status
+
+### 6.2 Configure notification semantics
+
+The configure notification is a trigger telling the target agent to reload desired state from KV.
+
+The notification is **not** the full desired configuration payload.
+
+### 6.3 Configure result contract
+
+Configure result/status messages must include:
+- `rpc_id` for correlation to the triggering request
+- the config UUID that was attempted or applied
+
+This is required so the cloud-facing side can determine:
+- which request produced the outcome
+- which desired config instance was actually processed
+
+`rpc_id` alone is not sufficient for configure outcomes.
+
+---
+
+## 7. Action contract
+
+Actions are modeled as direct command messages.
+
+Action submit sequence:
+1. caller submits a validated action request
+2. library publishes the action command on the target action subject
+3. target agent receives the action
+4. target agent executes local business logic
+5. target agent publishes result and/or status
+
+Actions are not stored in KV as desired state.
+
+---
+
+## 8. Result and status contract
+
+The library must provide standard result and status message envelopes.
+
+Result and status messages must preserve shared correlation fields consistently.
+
+For configure flows:
+- result/status must carry `rpc_id`
+- result/status must carry config UUID
+
+For action flows:
+- result/status must carry `rpc_id`
+- action-specific fields may be included as needed by the action contract
+
+---
+
+## 9. Subject model
+
+The default subject structure is target-oriented:
+
+- `cmd.configure.<target>`
+- `cmd.action.<target>.<action>`
+- `result.<target>`
+- `status.<target>`
+- `health.<target>`
+
+All subject generation must be centralized in the library.
+Consuming agents must not construct raw subjects ad hoc throughout the codebase.
+
+The library must validate subject inputs such as target and action before publishing or subscribing.
+
+---
+
+## 10. KV model
+
+### 10.1 Bucket usage
+
+The default KV bucket is used to store desired configuration records.
+
+Default conventions:
+- bucket: `cfg_desired`
+- key pattern: `desired.<target>`
+
+### 10.2 Contract-level behavior
+
+At the design level, KV is treated as storage for the **current desired config only**.
+
+The application contract does **not** depend on:
+- KV revision ordering
+- historical revision retrieval
+- revision-based config freshness decisions
+
+KV implementation metadata may exist internally, but it is not part of the design contract.
+
+### 10.3 API expectation
+
+The library must expose APIs to:
+- store desired config
+- load current desired config
+- optionally watch desired config changes
+- help agents reload current desired state on startup/recovery
+
+The primary load path is **load current desired config**, not load arbitrary historical revisions.
+
+---
+
+## 11. Reconnect and recovery model
+
+The library must support daemon-friendly reconnect behavior.
+
+After reconnect, the library must:
+- restore subscriptions
+- restore handler registrations
+- rebuild required NATS/JetStream/KV handles as needed
+
+The library must also support agent recovery flows in which an agent:
+- starts or restarts
+- reloads the current desired config from KV
+- reconciles local state against desired state
+
+Recovery is based on the **latest desired config** in KV.
+
+---
+
+## 12. Public API expectations
+
+The public API should provide, at minimum, support for:
+- connection lifecycle
+- health reporting
+- configure submission
+- action submission
+- result/status publication
+- desired config store/load/watch
+- handler registration for configure, action, result, and status
+
+The desired-config read API should return the decoded current desired-config record, including the config UUID needed for sync decisions.
+
+The design does **not** require an API for loading arbitrary KV revisions.
+
+---
+
+## 13. Validation and error handling
+
+The library must perform:
+- transport-level validation
+- message envelope sanity checks
+- required field validation for standard contracts
+
+The library must **not** implement deep cloud business-policy validation.
+
+Public APIs must return clear, typed errors with structured codes where appropriate.
+
+---
+
+## 14. Health and observability
+
+The library must expose health information in a safe, read-only form.
+
+The library should support:
+- logger hooks
+- metrics hooks
+
+These observability facilities must be pluggable and must not rely on global mutable state.
+
+---
+
+## 15. Concurrency model
+
+The library must be safe for concurrent use within an agent process.
+
+Internal mutable shared state such as:
+- connection/session state
+- handler registry
+- subscription restoration state
+
+must be protected appropriately inside the implementation.
+
+The design does not require application-level locking around desired config identity decisions.
+Sync decisions are based on comparing the running config UUID with the current desired config UUID.
+
+---
+
+## 16. Summary of key invariants
+
+The following are normative design invariants:
+
+1. `nats-agent-core` is a library, not a daemon.
+2. Configure uses **store desired state in KV, then notify**.
+3. Action uses **direct publish to target subject**.
+4. KV is a **single latest desired-config slot**, not a historical config store.
+5. Config UUID is an **opaque identity token** used for equality comparison only.
+6. `rpc_id` is used only for request/response correlation.
+7. Agents determine sync by comparing **running UUID** vs **desired UUID in KV**.
+8. Configure outcomes must include the **config UUID** that was attempted or applied.
+9. Revision-driven config ordering and rollback semantics are out of scope.
+10. Platform-specific execution logic remains outside the shared library.

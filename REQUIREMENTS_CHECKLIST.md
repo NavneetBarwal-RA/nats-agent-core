@@ -43,7 +43,7 @@ How to use:
 | [ ] | NATS-LIB-16 | Submit action through public API | Agent can call a public method to submit action | `SubmitAction(...)` | Integration/unit test for action submit flow | |
 | [ ] | NATS-LIB-17 | Publish result/status through public API | Agent can publish result and status using shared API | `PublishResult(...)`, `PublishStatus(...)` | Tests for result/status publication | |
 | [ ] | NATS-LIB-18 | Desired config store/retrieve API | Library can store and load desired config from KV | `StoreDesiredConfig(...)`, `LoadDesiredConfig(...)` | KV-related unit/integration tests | |
-| [ ] | NATS-LIB-19 | Expose revision/version of desired config | Caller can know which desired config version was loaded | `LoadDesiredConfigRevision(...)` or revision metadata | Unit tests for revision exposure | |
+| [ ] | NATS-LIB-19 | Expose config identity of desired config | Caller can know the UUID of the currently stored desired config | `LoadDesiredConfig(...)` returns a record containing config UUID | Unit tests for UUID exposure from desired config record | |
 | [ ] | NATS-LIB-20 | Standard subject generation | Library creates subject names in one standard way | subject helpers/builders | Unit tests for subject generation | |
 | [ ] | NATS-LIB-21 | Desired config load on startup/recovery | Agent can reload latest desired config on startup/recovery | `StartupReconcile(...)` and/or load helpers | Integration or unit tests for recovery path | |
 | [ ] | NATS-LIB-22 | Publish action to owner target | Actions are routed to correct target-specific subject | target-based action subject building | Unit tests for routing to correct subject | |
@@ -55,6 +55,7 @@ How to use:
 | [ ] | NATS-LIB-28 | Health snapshot / health exposure | Health API returns safe read-only state | `Health()` returns snapshot/copy | Unit tests for snapshot safety | |
 | [ ] | NATS-LIB-29 | Logger hooks | Agent can plug in its own logger | `Logger` interface and injection path | Unit tests or usage examples | |
 | [ ] | NATS-LIB-30 | Metrics hooks | Agent can plug in metrics collection | `Metrics` interface and hook points | Unit tests or usage examples | |
+| [ ] | NATS-LIB-31 | Configure outcome carries config identity | Configure result/status includes the config UUID that was attempted or applied | `ResultEnvelope`/configure-specific result model includes config UUID | Unit/integration tests for configure result carrying UUID | |
 
 ---
 
@@ -69,6 +70,7 @@ If you see these implemented inside the shared library, that is a design violati
 | [ ] | NATS-LIB-NR-02 | No reboot/script/trace/rtty execution in library | Shared library should not perform actual business actions | no reboot calls, no script execution, no trace implementation | |
 | [ ] | NATS-LIB-NR-03 | No local apply/rollback/state transition logic in library | Shared library should not own workload apply engines | no rollback engine, no workload state machine | |
 | [ ] | NATS-LIB-NR-04 | No cloud-side business validation policy in library | Shared library should only do transport-level validation | no deep cloud policy validation logic | |
+| [ ] | NATS-LIB-NR-05 | No revision-driven config contract | Shared library should not expose revision/history as part of the functional config model | no `LoadDesiredConfigRevision(...)` as required design API, no revision-based sync logic | |
 
 ---
 
@@ -93,6 +95,7 @@ Main requirements to review:
 - NATS-LIB-26
 - NATS-LIB-29
 - NATS-LIB-30
+- NATS-LIB-31
 
 Checklist:
 - [ ] Public types exist
@@ -100,6 +103,7 @@ Checklist:
 - [ ] `context.Context` appears in networked public methods
 - [ ] Error / logger / metrics types are present
 - [ ] No internal business logic leaked into public models
+- [ ] Configure result model includes config UUID
 
 Commit note:
 - `feat(api): bootstrap module and public API types`
@@ -117,12 +121,14 @@ Main requirements to review:
 - NATS-LIB-09
 - NATS-LIB-10
 - NATS-LIB-14
+- NATS-LIB-31
 
 Checklist:
 - [ ] Validation checks required fields
 - [ ] Validation is transport-level only
 - [ ] Correlation fields preserved in structs
 - [ ] Encode/decode helpers exist
+- [ ] Configure result/status preserves config UUID
 
 Commit note:
 - `feat(contract): add envelope validation and JSON codec`
@@ -180,6 +186,7 @@ Checklist:
 - [ ] health snapshot exists
 - [ ] shutdown drains the connection
 - [ ] mutable shared state is protected safely
+- [ ] KV usage is aligned to latest-state config storage
 
 Commit note:
 - `feat(session): add NATS session, JetStream, KV, and health`
@@ -204,6 +211,7 @@ Main requirements to review:
 - NATS-LIB-19
 - NATS-LIB-24
 - NATS-LIB-25
+- NATS-LIB-31
 
 Checklist:
 - [ ] `SubmitConfigure(...)` exists
@@ -212,7 +220,6 @@ Checklist:
 - [ ] `PublishStatus(...)` exists
 - [ ] `StoreDesiredConfig(...)` exists
 - [ ] `LoadDesiredConfig(...)` exists
-- [ ] `LoadDesiredConfigRevision(...)` exists
 - [ ] `WatchDesiredConfig(...)` exists
 - [ ] `StartupReconcile(...)` exists
 - [ ] handler registration methods exist
@@ -220,6 +227,7 @@ Checklist:
 - [ ] reconnect restore uses registry
 - [ ] configure flow is store-then-notify
 - [ ] action flow is direct publish
+- [ ] configure outcome includes config UUID
 
 Commit note:
 - `feat(transport): add submission APIs, handlers, and reconnect restoration`
@@ -265,6 +273,7 @@ Checklist:
 - [ ] health model tests
 - [ ] submission logic tests
 - [ ] registry/handler tests
+- [ ] config UUID propagation tests for configure flows
 
 Commit note:
 - `test(unit): add unit coverage for core library behavior`
@@ -282,6 +291,7 @@ Checklist:
 - [ ] action flow tested
 - [ ] result/status flow tested
 - [ ] reconnect behavior tested if practical
+- [ ] configure result UUID contract tested
 
 Commit note:
 - `test(integration): add real NATS JetStream integration coverage`
@@ -298,6 +308,7 @@ Checklist:
 - [ ] vyos-agent example
 - [ ] quick-start README
 - [ ] examples show library usage, not business logic internals
+- [ ] examples reflect UUID-based latest-state config model
 
 Commit note:
 - `docs(examples): add examples and quickstart README`
@@ -330,6 +341,9 @@ Before calling the library acceptable, answer these:
 - [ ] Can I trace each public requirement to API + implementation + tests?
 - [ ] Is configure clearly implemented as **store in KV, then notify**?
 - [ ] Is action clearly implemented as **direct publish to target subject**?
+- [ ] Is KV clearly used as a **single latest desired-config slot**?
+- [ ] Is config sync clearly based on **UUID equality**, not KV revision ordering?
+- [ ] Do configure outcomes include the config UUID that was attempted/applied?
 - [ ] Are subjects centralized and consistent?
 - [ ] Are envelopes standardized and validated?
 - [ ] Is reconnect and subscription restoration handled?
@@ -343,6 +357,7 @@ Before calling the library acceptable, answer these:
 ## Notes
 
 Use this file as a living review document.
+
 Add:
 - commit hashes
 - file names

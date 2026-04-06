@@ -1,4 +1,5 @@
 # nats-agent-core
+
 Core NATS agent library for OLG
 
 `nats-agent-core` is a shared Go library for agents that communicate over a NATS bus.
@@ -11,7 +12,6 @@ It provides common bus-facing functionality such as:
 - configure and action submission helpers
 - result and status publication helpers
 - desired configuration storage and retrieval
-- correlation using `rpc_id`
 
 The library is **not a daemon**.  
 It is meant to be used **inside long-running agents** such as:
@@ -39,13 +39,12 @@ This library helps agents:
 - connect to NATS
 - reconnect after temporary disconnects
 - create and use JetStream
-- store desired configuration in JetStream Key-Value
+- store desired configuration in JetStream KV
 - publish configure notifications
 - publish action commands
 - publish result and status messages
 - subscribe to message subjects
 - restore subscriptions after reconnect
-- preserve request identity using `rpc_id`
 
 ---
 
@@ -63,18 +62,35 @@ Examples of things that should stay outside this library:
 
 ---
 
+## Design overview
+
+The library follows a **latest desired-state** model for configuration.
+
+At a high level:
+- desired configuration is stored in JetStream KV
+- target agents reload the current desired config from KV
+- configure uses a **store-then-notify** flow
+- action uses a **direct publish** flow
+- sync is determined using config UUID comparison
+
+The library is designed around the idea that agents use shared transport/state helpers from one common package, while keeping execution logic in the agents themselves.
+
+---
+
 ## Basic communication model
 
 ### Configure flow
+
 1. Agent receives a validated configure request
 2. Library stores desired configuration in JetStream KV
 3. Library publishes a lightweight configure notification
 4. Target agent receives the notification
-5. Target agent loads the latest desired config from KV
+5. Target agent loads the current desired config from KV
 6. Target agent applies it locally
 7. Target agent publishes a result or status message
 
 ### Action flow
+
 1. Agent receives a validated action request
 2. Library publishes the action command on the target action subject
 3. Target agent receives the action
@@ -82,9 +98,35 @@ Examples of things that should stay outside this library:
 5. Target agent publishes a result or status message
 
 ### Result flow
+
 1. Target agent publishes result/status
 2. Calling side receives the message through the library
-3. Correlation is done using `rpc_id`
+3. Correlation is performed using shared message fields
 
 ---
 
+## Default subject model
+
+The default subject structure is target-oriented:
+
+- `cmd.configure.<target>`
+- `cmd.action.<target>.<action>`
+- `result.<target>`
+- `status.<target>`
+- `health.<target>`
+
+---
+
+## Default KV model
+
+Default KV conventions:
+- bucket: `cfg_desired`
+- key pattern: `desired.<target>`
+
+The library uses KV to hold the current desired configuration for a target.
+
+---
+
+## Notes
+
+For the normative design contract and exact behavior, see `SPEC.md`.

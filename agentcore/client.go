@@ -232,20 +232,6 @@ func (c *Client) LoadDesiredConfig(ctx context.Context, target string) (*StoredD
 	}
 }
 
-// LoadDesiredConfigRevision loads a specific desired-config revision later.
-func (c *Client) LoadDesiredConfigRevision(ctx context.Context, target string, revision uint64) (*StoredDesiredConfig, error) {
-	_ = ctx
-	_ = target
-	_ = revision
-
-	return nil, &Error{
-		Code:      CodeNotImplemented,
-		Op:        "load_desired_config_revision",
-		Message:   "LoadDesiredConfigRevision is not implemented in bootstrap phase",
-		Retryable: false,
-	}
-}
-
 // WatchDesiredConfig registers a desired-config watch in later phases.
 func (c *Client) WatchDesiredConfig(ctx context.Context, target string, handler DesiredConfigWatchHandler) (StopFunc, error) {
 	_ = ctx

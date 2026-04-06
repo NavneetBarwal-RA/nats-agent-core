@@ -6,6 +6,7 @@ import (
 )
 
 // BaseEnvelope contains common fields used across the shared wire contract.
+// RPCID is used for request/response correlation across transport flows.
 type BaseEnvelope struct {
 	Version   string    `json:"version"`
 	RPCID     string    `json:"rpc_id,omitempty"`
@@ -14,6 +15,7 @@ type BaseEnvelope struct {
 }
 
 // ConfigureCommand is the caller-facing configure submission payload.
+// UUID is the opaque desired-config identity used for sync/apply decisions.
 type ConfigureCommand struct {
 	Version   string          `json:"version"`
 	RPCID     string          `json:"rpc_id"`
@@ -24,6 +26,7 @@ type ConfigureCommand struct {
 }
 
 // DesiredConfigRecord is the authoritative desired state stored in KV.
+// UUID is the opaque desired-config identity used for sync/apply decisions.
 type DesiredConfigRecord struct {
 	Version   string          `json:"version"`
 	RPCID     string          `json:"rpc_id"`
@@ -34,6 +37,8 @@ type DesiredConfigRecord struct {
 }
 
 // ConfigureNotification is the lightweight post-store configure trigger.
+// RPCID is used for correlation, while UUID is the desired-config identity
+// agents compare against locally applied state.
 type ConfigureNotification struct {
 	Version     string    `json:"version"`
 	RPCID       string    `json:"rpc_id"`
@@ -42,7 +47,6 @@ type ConfigureNotification struct {
 	UUID        string    `json:"uuid"`
 	KVBucket    string    `json:"kv_bucket"`
 	KVKey       string    `json:"kv_key"`
-	KVRevision  uint64    `json:"kv_revision"`
 	Timestamp   time.Time `json:"timestamp"`
 }
 
@@ -85,6 +89,8 @@ type StatusEnvelope struct {
 }
 
 // StoredDesiredConfig represents a desired-config record loaded from KV.
+// Revision is KV storage metadata only and is intended for diagnostics and
+// storage introspection, not desired-state version semantics.
 type StoredDesiredConfig struct {
 	Record    DesiredConfigRecord `json:"record"`
 	Bucket    string              `json:"bucket"`
@@ -94,6 +100,8 @@ type StoredDesiredConfig struct {
 }
 
 // SubmissionAck reports acceptance of a configure or action submission.
+// KVRevision is write metadata only and does not determine agent sync or apply
+// correctness.
 type SubmissionAck struct {
 	Accepted   bool      `json:"accepted"`
 	RPCID      string    `json:"rpc_id,omitempty"`

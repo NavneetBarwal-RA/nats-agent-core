@@ -1,4 +1,6 @@
-Read SPEC.md, REQUIREMENTS_CHECKLIST.md, and the LLD carefully.
+Read PROMPTS/IMPLEMENTATION_PROMPT.md, SPEC.md, REQUIREMENTS_CHECKLIST.md, and the LLD carefully.
+Use PROMPTS/IMPLEMENTATION_PROMPT.md as the primary implementation source of truth for code generation scope and API shape.
+Use SPEC.md as supporting design context.
 
 Revise the existing Phase 1 bootstrap only. Do not implement Phase 2 or later work.
 

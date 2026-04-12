@@ -204,6 +204,7 @@ func TestStatusEnvelopeJSONRoundTrip(t *testing.T) {
 		Version:   "1.0",
 		RPCID:     "rpc-status-1",
 		Target:    "vyos",
+		UUID:      "cfg-001",
 		Status:    "running",
 		Stage:     "startup",
 		Message:   "agent ready",
@@ -229,6 +230,9 @@ func TestStatusEnvelopeJSONRoundTrip(t *testing.T) {
 	}
 	if got.Target != want.Target {
 		t.Fatalf("expected Target %q, got %q", want.Target, got.Target)
+	}
+	if got.UUID != want.UUID {
+		t.Fatalf("expected UUID %q, got %q", want.UUID, got.UUID)
 	}
 	if got.Status != want.Status {
 		t.Fatalf("expected Status %q, got %q", want.Status, got.Status)

@@ -134,6 +134,22 @@ This is required so the cloud-facing side can determine:
 
 `rpc_id` alone is not sufficient for configure outcomes.
 
+### 6.4 Configure submission failure semantics
+
+Configure submission must expose clear failure outcomes:
+
+- validation failure:
+  - submission is rejected
+  - desired config is not written to KV
+  - configure notification is not published
+- KV store failure:
+  - submission fails
+  - configure notification is not published
+- notify publish failure after KV store success:
+  - submission fails with explicit publish-failure semantics
+  - desired config remains stored in KV (no implicit rollback)
+  - callers may retry notification or re-submit based on policy
+
 ---
 
 ## 7. Action contract

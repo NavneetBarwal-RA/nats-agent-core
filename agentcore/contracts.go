@@ -77,10 +77,13 @@ type ResultEnvelope struct {
 }
 
 // StatusEnvelope reports target-owned status updates.
+// UUID is optional for generic status, but should be provided for configure
+// progress/status so consumers can correlate to desired-config identity.
 type StatusEnvelope struct {
 	Version   string          `json:"version"`
 	RPCID     string          `json:"rpc_id,omitempty"`
 	Target    string          `json:"target"`
+	UUID      string          `json:"uuid,omitempty"`
 	Status    string          `json:"status"`
 	Stage     string          `json:"stage,omitempty"`
 	Message   string          `json:"message,omitempty"`

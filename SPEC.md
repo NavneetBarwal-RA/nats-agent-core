@@ -136,6 +136,9 @@ This is required so the cloud-facing side can determine:
 
 ### 6.4 Configure submission failure semantics
 
+SubmissionAck is a direct API return value from configure submission calls.
+It is not a bus-delivered message and is not published or consumed over NATS subjects.
+
 Configure submission must expose clear failure outcomes:
 
 - validation failure:

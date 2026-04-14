@@ -57,7 +57,7 @@ deferred to later phases.
 The intended end-state of this library is to help agents:
 
 This section describes the target design and is not fully implemented in the
-current Phase 1 bootstrap.
+current Phase 1 + Phase 2 state.
 
 - connect to NATS
 - reconnect after temporary disconnects

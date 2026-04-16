@@ -175,3 +175,29 @@ func TestUnwrapOnNilReceiverReturnsNil(t *testing.T) {
 		t.Fatalf("expected nil, got %v", got)
 	}
 }
+
+/*
+TC-ERROR-008
+Type: Positive
+Title: Error string includes op and code when message is empty
+Summary:
+Verifies the Error.Error() formatting branch where Op is set but Message is
+empty. In this case, the string should still be stable and meaningful.
+
+Validates:
+  - Error() returns "<op>: <code>" when Message is empty
+  - formatting does not require Message to be populated
+*/
+func TestErrorStringReturnsOpAndCodeWhenMessageIsEmpty(t *testing.T) {
+	err := &Error{
+		Code: CodeDecodeFailed,
+		Op:   "decode_result",
+	}
+
+	got := err.Error()
+	want := "decode_result: decode_failed"
+
+	if got != want {
+		t.Fatalf("expected %q, got %q", want, got)
+	}
+}

@@ -630,3 +630,31 @@ func TestBootstrapStubMethodsReturnCodeNotImplemented(t *testing.T) {
 		})
 	}
 }
+
+/*
+TC-CLIENT-008
+Type: Positive
+Title: New tolerates a nil constructor option
+Summary:
+Verifies that New(...) safely ignores a nil option entry in the variadic option
+list. This is intentional bootstrap behavior in the current implementation.
+
+Validates:
+  - New(cfg, nil) does not panic
+  - New(cfg, nil) does not return an error
+  - returned client is non-nil
+  - initial health state remains StateNew
+*/
+func TestNewToleratesNilOption(t *testing.T) {
+	client, err := New(testConfig(), nil)
+	if err != nil {
+		t.Fatalf("New returned unexpected error for nil option: %v", err)
+	}
+	if client == nil {
+		t.Fatal("expected non-nil client, got nil")
+	}
+
+	if got := client.Health().State; got != StateNew {
+		t.Fatalf("expected initial health state %q, got %q", StateNew, got)
+	}
+}

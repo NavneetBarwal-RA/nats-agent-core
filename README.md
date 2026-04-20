@@ -34,21 +34,22 @@ In simple words:
 
 ## Current status
 
-This repository is currently at **Phase 1 bootstrap + Phase 2 contract layer**.
+This repository currently includes **Phase 1 bootstrap + Phase 2 contract layer + Phase 3 messaging foundations**.
 
 Current code includes:
 - public config types
-- public client method signatures
+- public client facade method signatures
 - standard envelope and storage models
 - typed public errors
 - logger and metrics interfaces
 - shared contract codec helpers (`internal/contract`)
 - shared contract validation helpers (`internal/contract`)
+- centralized subject generation and validation helpers (`internal/subjects`)
+- shared publish wrappers and configure store-then-notify groundwork (`internal/transport`)
 
-Runtime transport behavior is intentionally **not implemented yet** in this
-phase set. That means transport/session/KV/subject/publish-subscribe/reconnect
-runtime execution logic is
-deferred to later phases.
+Full runtime session/JetStream/KV wiring, subscribe/handler runtime flow,
+reconnect restoration, and public `agentcore.Client` method wiring are
+intentionally deferred to later phases.
 
 ---
 
@@ -57,7 +58,7 @@ deferred to later phases.
 The intended end-state of this library is to help agents:
 
 This section describes the target design and is not fully implemented in the
-current Phase 1 + Phase 2 state.
+current Phase 1 + Phase 2 + Phase 3 foundation state.
 
 - connect to NATS
 - reconnect after temporary disconnects
@@ -103,7 +104,7 @@ The library is designed around the idea that agents use shared transport/state h
 ## Basic communication model
 
 The flows below describe the target design. They are not fully implemented in
-the current Phase 1 + Phase 2 state.
+the current Phase 1 + Phase 2 + Phase 3 foundation state.
 
 ### Configure flow
 

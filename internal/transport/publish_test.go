@@ -646,3 +646,63 @@ func TestPublishStatusWrapsPublisherFailure(t *testing.T) {
 		t.Fatal("expected wrapped publish cause to be reachable via errors.Is")
 	}
 }
+
+/*
+TC-TRANSPORT-PUBLISH-017
+Type: Negative
+Title: PublishConfigureNotification rejects invalid target before publish
+Summary:
+Verifies that configure notification publish validates target input before
+encoding and publishing.
+
+Validates:
+  - invalid target returns validate_target error
+  - publish side effect is skipped
+*/
+func TestPublishConfigureNotificationRejectsInvalidTargetBeforePublish(t *testing.T) {
+	paths, err := NewPublishPaths(subjects.NewDefaultBuilder())
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+
+	msg := validTransportConfigureNotification()
+	msg.Target = "vyos core"
+	pub := &stubPublisher{}
+
+	err = paths.PublishConfigureNotification(context.Background(), pub, msg)
+	requireTransportAgentcoreError(t, err, agentcore.CodeValidation, "validate_target", "target cannot contain whitespace")
+	if len(pub.calls) != 0 {
+		t.Fatalf("expected publish not to be called, got %d calls", len(pub.calls))
+	}
+}
+
+/*
+TC-TRANSPORT-PUBLISH-018
+Type: Positive
+Title: publishEncoded publishes successfully with valid dependencies
+Summary:
+Verifies that the shared publish helper succeeds and forwards subject and payload
+to the publisher when all dependencies are valid.
+
+Validates:
+  - helper returns nil for a successful publish
+  - publisher receives one call with expected subject and payload
+*/
+func TestPublishEncodedPublishesSuccessfullyWithValidDependencies(t *testing.T) {
+	pub := &stubPublisher{}
+	payload := []byte(`{"ok":true}`)
+
+	err := publishEncoded(context.Background(), pub, "publish_result", "result.vyos", payload)
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if len(pub.calls) != 1 {
+		t.Fatalf("expected one publish call, got %d", len(pub.calls))
+	}
+	if pub.calls[0].subject != "result.vyos" {
+		t.Fatalf("expected subject %q, got %q", "result.vyos", pub.calls[0].subject)
+	}
+	if string(pub.calls[0].payload) != string(payload) {
+		t.Fatalf("expected payload %s, got %s", string(payload), string(pub.calls[0].payload))
+	}
+}

@@ -48,6 +48,7 @@ General test design rules:
 - On failure, assert whether returned ack/result should be nil where applicable
 - Always assert whether downstream side effects were skipped or already performed
 - Prefer wrapper-level tests, not only shared helper tests, for invalid input and publish failure paths
+- For each publish wrapper, include at least one invalid-routing-input test before publish is attempted
 - Keep tests readable, deterministic, and focused
 - Use small test doubles and explicit assertions rather than over-abstracting test helpers
 
@@ -112,6 +113,7 @@ Include tests for:
 - custom/internal clock is used for AcceptedAt if implementation supports it
 - SubmitAction rejects invalid target before publish
 - SubmitAction rejects invalid action before publish
+- PublishConfigureNotification rejects invalid target before publish
 - PublishResult rejects invalid target before publish
 - PublishStatus rejects invalid target before publish
 - PublishResult wraps publisher failure

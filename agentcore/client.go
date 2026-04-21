@@ -2,7 +2,9 @@ package agentcore
 
 import (
 	"context"
+	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -81,8 +83,13 @@ func WithErrorSink(fn func(error)) Option {
 type Client struct {
 	mu      sync.RWMutex
 	cfg     Config
-	health  HealthSnapshot
 	options clientOptions
+
+	session *runtimeSession
+	kv      *desiredKVStore
+
+	nextWatchID uint64
+	watches     map[uint64]StopFunc
 }
 
 // New validates public options and constructs a bootstrap client facade.
@@ -99,12 +106,30 @@ func New(cfg Config, opts ...Option) (*Client, error) {
 		}
 	}
 
+	if options.logger == nil {
+		options.logger = cfg.Observe.Logger
+	}
+	if options.metrics == nil {
+		options.metrics = cfg.Observe.Metrics
+	}
+
+	runtime, err := newRuntimeSession(cfg, runtimeHooks{
+		Logger:    options.logger,
+		Metrics:   options.metrics,
+		ErrorSink: options.errorSink,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	store := newDesiredKVStore(runtime, options.errorSink)
+
 	return &Client{
-		cfg: cfg,
-		health: HealthSnapshot{
-			State: StateNew,
-		},
+		cfg:     cfg,
 		options: options,
+		session: runtime,
+		kv:      store,
+		watches: make(map[uint64]StopFunc),
 	}, nil
 }
 
@@ -115,43 +140,43 @@ func (c *Client) Config() Config {
 	return c.cfg
 }
 
-// Start begins the client lifecycle. Transport/session setup is deferred.
+// Start begins the client lifecycle.
 func (c *Client) Start(ctx context.Context) error {
-	_ = ctx
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.health.State = StateConnecting
-
-	return &Error{
-		Code:      CodeNotImplemented,
-		Op:        "start",
-		Message:   "Start is not implemented in bootstrap phase",
-		Retryable: false,
-	}
+	return c.session.start(ctx)
 }
 
-// Close ends the client lifecycle. Drain behavior is deferred.
+// Close ends the client lifecycle with watch cleanup and connection drain.
 func (c *Client) Close(ctx context.Context) error {
-	_ = ctx
+	watchErr := c.stopAllWatches()
+	sessionErr := c.session.close(ctx)
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.health.State = StateDraining
-
-	return &Error{
-		Code:      CodeNotImplemented,
-		Op:        "close",
-		Message:   "Close is not implemented in bootstrap phase",
-		Retryable: false,
+	if watchErr != nil && sessionErr == nil {
+		return &Error{
+			Code:      CodeShutdown,
+			Op:        "close_stop_watches",
+			Message:   "failed to stop one or more desired-config watches",
+			Retryable: false,
+			Err:       watchErr,
+		}
 	}
+	if watchErr != nil && sessionErr != nil {
+		return &Error{
+			Code:      CodeShutdown,
+			Op:        "close",
+			Message:   "close failed with watch-stop and session shutdown errors",
+			Retryable: true,
+			Err:       errors.Join(watchErr, sessionErr),
+		}
+	}
+	return sessionErr
 }
 
 // Health returns the latest public health snapshot.
 func (c *Client) Health() HealthSnapshot {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.health
+	if c.session == nil {
+		return HealthSnapshot{State: StateNew}
+	}
+	return c.session.healthSnapshot()
 }
 
 // SubmitConfigure accepts a configure command for later-phase transport logic.
@@ -206,57 +231,28 @@ func (c *Client) PublishStatus(ctx context.Context, msg StatusEnvelope) error {
 	}
 }
 
-// StoreDesiredConfig writes desired configuration in later phases.
+// StoreDesiredConfig writes desired configuration to JetStream KV.
 func (c *Client) StoreDesiredConfig(ctx context.Context, rec DesiredConfigRecord) (*StoredDesiredConfig, error) {
-	_ = ctx
-	_ = rec
-
-	return nil, &Error{
-		Code:      CodeNotImplemented,
-		Op:        "store_desired_config",
-		Message:   "StoreDesiredConfig is not implemented in bootstrap phase",
-		Retryable: false,
-	}
+	return c.kv.StoreDesiredConfig(ctx, rec)
 }
 
-// LoadDesiredConfig loads desired configuration in later phases.
+// LoadDesiredConfig loads desired configuration from JetStream KV.
 func (c *Client) LoadDesiredConfig(ctx context.Context, target string) (*StoredDesiredConfig, error) {
-	_ = ctx
-	_ = target
-
-	return nil, &Error{
-		Code:      CodeNotImplemented,
-		Op:        "load_desired_config",
-		Message:   "LoadDesiredConfig is not implemented in bootstrap phase",
-		Retryable: false,
-	}
+	return c.kv.LoadDesiredConfig(ctx, target)
 }
 
-// WatchDesiredConfig registers a desired-config watch in later phases.
+// WatchDesiredConfig registers a desired-config watch scoped to a single target.
 func (c *Client) WatchDesiredConfig(ctx context.Context, target string, handler DesiredConfigWatchHandler) (StopFunc, error) {
-	_ = ctx
-	_ = target
-	_ = handler
-
-	return nil, &Error{
-		Code:      CodeNotImplemented,
-		Op:        "watch_desired_config",
-		Message:   "WatchDesiredConfig is not implemented in bootstrap phase",
-		Retryable: false,
+	stop, err := c.kv.WatchDesiredConfig(ctx, target, handler)
+	if err != nil {
+		return nil, err
 	}
+	return c.trackWatch(stop), nil
 }
 
-// StartupReconcile loads latest desired state during recovery in later phases.
+// StartupReconcile loads latest desired state during recovery.
 func (c *Client) StartupReconcile(ctx context.Context, target string) (*StoredDesiredConfig, error) {
-	_ = ctx
-	_ = target
-
-	return nil, &Error{
-		Code:      CodeNotImplemented,
-		Op:        "startup_reconcile",
-		Message:   "StartupReconcile is not implemented in bootstrap phase",
-		Retryable: false,
-	}
+	return c.LoadDesiredConfig(ctx, target)
 }
 
 // RegisterConfigureHandler registers a configure notification handler.
@@ -314,4 +310,54 @@ func (c *Client) RegisterStatusHandler(target string, handler StatusHandler, opt
 		Message:   "RegisterStatusHandler is not implemented in bootstrap phase",
 		Retryable: false,
 	}
+}
+
+func (c *Client) trackWatch(stop StopFunc) StopFunc {
+	id := atomic.AddUint64(&c.nextWatchID, 1)
+
+	c.mu.Lock()
+	c.watches[id] = stop
+	c.mu.Unlock()
+
+	var once sync.Once
+	return func() error {
+		var stopErr error
+		once.Do(func() {
+			c.mu.Lock()
+			stored := c.watches[id]
+			delete(c.watches, id)
+			c.mu.Unlock()
+			if stored != nil {
+				stopErr = stored()
+			}
+		})
+		return stopErr
+	}
+}
+
+func (c *Client) stopAllWatches() error {
+	c.mu.Lock()
+	stops := make([]StopFunc, 0, len(c.watches))
+	for id, stop := range c.watches {
+		_ = id
+		stops = append(stops, stop)
+	}
+	c.watches = make(map[uint64]StopFunc)
+	c.mu.Unlock()
+
+	var joined error
+	for _, stop := range stops {
+		if stop == nil {
+			continue
+		}
+		if err := stop(); err != nil {
+			if joined == nil {
+				joined = err
+			} else {
+				joined = errors.Join(joined, err)
+			}
+		}
+	}
+
+	return joined
 }

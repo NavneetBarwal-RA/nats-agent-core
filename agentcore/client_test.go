@@ -722,3 +722,32 @@ func TestWatchDesiredConfigRejectsNilHandler(t *testing.T) {
 		t.Fatalf("expected error op %q, got %q", "watch_desired_config", got.Op)
 	}
 }
+
+/*
+TC-CLIENT-010
+Type: Negative
+Title: StartupReconcile delegates to desired-config load path
+Summary:
+Verifies that StartupReconcile(...) uses the same runtime-backed desired-config
+load behavior as LoadDesiredConfig(...) before Start.
+
+Validates:
+  - StartupReconcile returns CodeDisconnected before Start
+  - returned error op matches load_desired_config delegation path
+*/
+func TestStartupReconcileDelegatesToLoadDesiredConfigPath(t *testing.T) {
+	client, err := New(testConfig())
+	if err != nil {
+		t.Fatalf("New returned unexpected error: %v", err)
+	}
+
+	stored, err := client.StartupReconcile(context.Background(), "vyos")
+	if stored != nil {
+		t.Fatalf("expected nil StoredDesiredConfig, got %#v", stored)
+	}
+
+	got := requireErrorCode(t, err, CodeDisconnected)
+	if got.Op != "key_value" {
+		t.Fatalf("expected error op %q, got %q", "key_value", got.Op)
+	}
+}

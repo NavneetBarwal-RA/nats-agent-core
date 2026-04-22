@@ -259,10 +259,16 @@ func (c *Client) LoadDesiredConfig(ctx context.Context, target string) (*StoredD
 
 // WatchDesiredConfig registers a desired-config watch scoped to a single target.
 func (c *Client) WatchDesiredConfig(ctx context.Context, target string, handler DesiredConfigWatchHandler) (StopFunc, error) {
-	stop, err := c.kv.WatchDesiredConfig(ctx, target, func(watchCtx context.Context, stored kv.StoredDesiredConfig) error {
-		if handler == nil {
-			return nil
+	if handler == nil {
+		return nil, &Error{
+			Code:      CodeValidation,
+			Op:        "watch_desired_config",
+			Message:   "watch handler is required",
+			Retryable: false,
 		}
+	}
+
+	stop, err := c.kv.WatchDesiredConfig(ctx, target, func(watchCtx context.Context, stored kv.StoredDesiredConfig) error {
 		return handler(watchCtx, StoredDesiredConfig{
 			Record: DesiredConfigRecord{
 				Version:   stored.Record.Version,

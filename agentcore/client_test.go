@@ -690,3 +690,35 @@ func TestNewToleratesNilOption(t *testing.T) {
 		t.Fatalf("expected initial health state %q, got %q", StateNew, got)
 	}
 }
+
+/*
+TC-CLIENT-009
+Type: Negative
+Title: WatchDesiredConfig rejects a nil handler
+Summary:
+Verifies that WatchDesiredConfig(...) fails fast when called with a nil
+DesiredConfigWatchHandler. The public facade should reject the call before any
+watch is created or delegated to the runtime KV layer.
+
+Validates:
+  - WatchDesiredConfig(ctx, target, nil) returns a non-nil error
+  - returned StopFunc is nil
+  - error code is CodeValidation
+  - error op is watch_desired_config
+*/
+func TestWatchDesiredConfigRejectsNilHandler(t *testing.T) {
+	client, err := New(testConfig())
+	if err != nil {
+		t.Fatalf("New returned unexpected error: %v", err)
+	}
+
+	stop, err := client.WatchDesiredConfig(context.Background(), "vyos", nil)
+	if stop != nil {
+		t.Fatalf("expected nil StopFunc, got non-nil")
+	}
+
+	got := requireErrorCode(t, err, CodeValidation)
+	if got.Op != "watch_desired_config" {
+		t.Fatalf("expected error op %q, got %q", "watch_desired_config", got.Op)
+	}
+}

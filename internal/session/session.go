@@ -13,20 +13,13 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/routerarchitects/nats-agent-core/agentcore"
+	"github.com/routerarchitects/nats-agent-core/internal/runtimeerr"
 )
-
-// Hooks bundles optional observability hooks consumed by the session layer.
-type Hooks struct {
-	Logger    agentcore.Logger
-	Metrics   agentcore.Metrics
-	ErrorSink func(error)
-}
 
 // Manager owns the runtime NATS, JetStream, KV, and health session state.
 type Manager struct {
 	mu        sync.RWMutex
-	cfg       agentcore.Config
+	cfg       Config
 	effective EffectiveConfig
 	hooks     Hooks
 
@@ -34,13 +27,13 @@ type Manager struct {
 	js jetstream.JetStream
 	kv jetstream.KeyValue
 
-	health   agentcore.HealthSnapshot
+	health   HealthSnapshot
 	starting bool
 	closing  bool
 }
 
 // NewManager constructs a session manager with normalized runtime defaults.
-func NewManager(cfg agentcore.Config, hooks Hooks) (*Manager, error) {
+func NewManager(cfg Config, hooks Hooks) (*Manager, error) {
 	effective, err := normalizeConfig(cfg)
 	if err != nil {
 		return nil, err
@@ -50,24 +43,45 @@ func NewManager(cfg agentcore.Config, hooks Hooks) (*Manager, error) {
 		cfg:       cfg,
 		effective: effective,
 		hooks:     hooks,
-		health: agentcore.HealthSnapshot{
-			State: agentcore.StateNew,
+		health: HealthSnapshot{
+			State: StateNew,
 		},
 	}, nil
 }
 
 // EffectiveConfig returns the normalized config currently used by the runtime.
-func (m *Manager) EffectiveConfig() agentcore.Config {
+func (m *Manager) EffectiveConfig() Config {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.effective.Config
 }
 
 // HealthSnapshot returns the latest read-only transport health snapshot.
-func (m *Manager) HealthSnapshot() agentcore.HealthSnapshot {
+func (m *Manager) HealthSnapshot() HealthSnapshot {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.health
+}
+
+// DesiredConfigBucket returns the configured desired-config KV bucket.
+func (m *Manager) DesiredConfigBucket() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.effective.Config.KV.Bucket
+}
+
+// DesiredConfigKeyPattern returns the configured desired-config KV key pattern.
+func (m *Manager) DesiredConfigKeyPattern() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.effective.Config.KV.KeyPattern
+}
+
+// KVTimeout returns the configured KV timeout used for storage operations.
+func (m *Manager) KVTimeout() time.Duration {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.effective.Config.Timeouts.KVTimeout
 }
 
 // Start initializes the runtime connection, JetStream handle, and KV bucket.
@@ -76,8 +90,8 @@ func (m *Manager) Start(ctx context.Context) error {
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
-		return &agentcore.Error{
-			Code:      agentcore.CodeConnectionFailed,
+		return &runtimeerr.Error{
+			Code:      runtimeerr.CodeConnectionFailed,
 			Op:        "start",
 			Message:   "start context is not usable",
 			Retryable: true,
@@ -88,8 +102,8 @@ func (m *Manager) Start(ctx context.Context) error {
 	m.mu.Lock()
 	if m.starting {
 		m.mu.Unlock()
-		return &agentcore.Error{
-			Code:      agentcore.CodeValidation,
+		return &runtimeerr.Error{
+			Code:      runtimeerr.CodeValidation,
 			Op:        "start",
 			Message:   "start already in progress",
 			Retryable: false,
@@ -100,7 +114,7 @@ func (m *Manager) Start(ctx context.Context) error {
 		return nil
 	}
 	m.starting = true
-	m.setStateLocked(agentcore.StateConnecting)
+	m.setStateLocked(StateConnecting)
 	m.mu.Unlock()
 
 	defer func() {
@@ -117,8 +131,8 @@ func (m *Manager) Start(ctx context.Context) error {
 		if m.hooks.Metrics != nil {
 			m.hooks.Metrics.IncConnect("failure")
 		}
-		return &agentcore.Error{
-			Code:      agentcore.CodeConnectionFailed,
+		return &runtimeerr.Error{
+			Code:      runtimeerr.CodeConnectionFailed,
 			Op:        "start_connect",
 			Message:   "failed to connect to NATS",
 			Retryable: true,
@@ -132,8 +146,8 @@ func (m *Manager) Start(ctx context.Context) error {
 		m.mu.Lock()
 		m.setDegradedLocked(err)
 		m.mu.Unlock()
-		return &agentcore.Error{
-			Code:      agentcore.CodeJetStreamFailed,
+		return &runtimeerr.Error{
+			Code:      runtimeerr.CodeJetStreamFailed,
 			Op:        "start_jetstream",
 			Message:   "failed to initialize JetStream",
 			Retryable: true,
@@ -150,8 +164,8 @@ func (m *Manager) Start(ctx context.Context) error {
 		m.mu.Lock()
 		m.setDegradedLocked(err)
 		m.mu.Unlock()
-		return &agentcore.Error{
-			Code:      agentcore.CodeJetStreamFailed,
+		return &runtimeerr.Error{
+			Code:      runtimeerr.CodeJetStreamFailed,
 			Op:        "start_kv",
 			Message:   "failed to bind or create desired-config KV bucket",
 			Retryable: true,
@@ -191,7 +205,7 @@ func (m *Manager) Close(ctx context.Context) error {
 	}
 
 	m.closing = true
-	m.setStateLocked(agentcore.StateDraining)
+	m.setStateLocked(StateDraining)
 
 	nc := m.nc
 	shutdownTimeout := m.effective.Config.Timeouts.ShutdownTimeout
@@ -215,8 +229,8 @@ func (m *Manager) Close(ctx context.Context) error {
 	m.mu.Unlock()
 
 	if drainErr != nil {
-		return &agentcore.Error{
-			Code:      agentcore.CodeShutdown,
+		return &runtimeerr.Error{
+			Code:      runtimeerr.CodeShutdown,
 			Op:        "close",
 			Message:   "failed to drain NATS connection cleanly",
 			Retryable: true,
@@ -233,8 +247,8 @@ func (m *Manager) KeyValue() (jetstream.KeyValue, error) {
 	defer m.mu.RUnlock()
 
 	if m.nc == nil || m.nc.Status() != nats.CONNECTED || m.kv == nil {
-		return nil, &agentcore.Error{
-			Code:      agentcore.CodeDisconnected,
+		return nil, &runtimeerr.Error{
+			Code:      runtimeerr.CodeDisconnected,
 			Op:        "key_value",
 			Message:   "client runtime is not connected",
 			Retryable: true,
@@ -305,7 +319,7 @@ func (m *Manager) buildNATSOptions() ([]nats.Option, error) {
 	return opts, nil
 }
 
-func buildTLSConfig(cfg *agentcore.TLSConfig) (*tls.Config, error) {
+func buildTLSConfig(cfg *TLSConfig) (*tls.Config, error) {
 	if cfg == nil || !cfg.Enabled {
 		return nil, nil
 	}

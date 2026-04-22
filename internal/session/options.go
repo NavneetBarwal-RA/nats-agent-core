@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
-	"github.com/routerarchitects/nats-agent-core/agentcore"
+	"github.com/routerarchitects/nats-agent-core/internal/runtimeerr"
 )
 
 const (
@@ -34,10 +34,10 @@ const (
 
 // EffectiveConfig is the normalized runtime config used by session and KV paths.
 type EffectiveConfig struct {
-	Config agentcore.Config
+	Config Config
 }
 
-func normalizeConfig(cfg agentcore.Config) (EffectiveConfig, error) {
+func normalizeConfig(cfg Config) (EffectiveConfig, error) {
 	const op = "normalize_runtime_config"
 
 	out := cfg
@@ -177,8 +177,8 @@ func normalizeConfig(cfg agentcore.Config) (EffectiveConfig, error) {
 }
 
 func validationError(op, message string) error {
-	return &agentcore.Error{
-		Code:      agentcore.CodeValidation,
+	return &runtimeerr.Error{
+		Code:      runtimeerr.CodeValidation,
 		Op:        op,
 		Message:   message,
 		Retryable: false,

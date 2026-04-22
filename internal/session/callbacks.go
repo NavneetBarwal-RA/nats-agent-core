@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/nats-io/nats.go"
-	"github.com/routerarchitects/nats-agent-core/agentcore"
+	"github.com/routerarchitects/nats-agent-core/internal/runtimeerr"
 )
 
 func (m *Manager) onDisconnect(_ *nats.Conn, err error) {
@@ -58,8 +58,8 @@ func (m *Manager) rebindAfterReconnect(nc *nats.Conn) {
 		m.mu.Lock()
 		m.setDegradedLocked(err)
 		m.mu.Unlock()
-		m.onAsyncError(&agentcore.Error{
-			Code:      agentcore.CodeJetStreamFailed,
+		m.onAsyncError(&runtimeerr.Error{
+			Code:      runtimeerr.CodeJetStreamFailed,
 			Op:        "reconnect_jetstream",
 			Message:   "failed to rebuild JetStream handle after reconnect",
 			Retryable: true,
@@ -73,8 +73,8 @@ func (m *Manager) rebindAfterReconnect(nc *nats.Conn) {
 		m.mu.Lock()
 		m.setDegradedLocked(err)
 		m.mu.Unlock()
-		m.onAsyncError(&agentcore.Error{
-			Code:      agentcore.CodeJetStreamFailed,
+		m.onAsyncError(&runtimeerr.Error{
+			Code:      runtimeerr.CodeJetStreamFailed,
 			Op:        "reconnect_kv",
 			Message:   "failed to rebind KV bucket after reconnect",
 			Retryable: true,

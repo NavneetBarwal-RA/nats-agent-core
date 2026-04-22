@@ -2,21 +2,48 @@ package kv
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/routerarchitects/nats-agent-core/agentcore"
-	"github.com/routerarchitects/nats-agent-core/internal/contract"
+	"github.com/routerarchitects/nats-agent-core/internal/runtimeerr"
 )
 
 // RuntimeProvider exposes session runtime handles required by KV operations.
 type RuntimeProvider interface {
 	KeyValue() (jetstream.KeyValue, error)
-	EffectiveConfig() agentcore.Config
+	DesiredConfigBucket() string
+	DesiredConfigKeyPattern() string
+	KVTimeout() time.Duration
 }
+
+// DesiredConfigRecord is the desired-state payload stored in KV.
+type DesiredConfigRecord struct {
+	Version   string
+	RPCID     string
+	Target    string
+	UUID      string
+	Payload   json.RawMessage
+	Timestamp time.Time
+}
+
+// StoredDesiredConfig wraps desired-state payload and KV metadata.
+type StoredDesiredConfig struct {
+	Record    DesiredConfigRecord
+	Bucket    string
+	Key       string
+	Revision  uint64
+	CreatedAt time.Time
+}
+
+// WatchHandler handles desired-config watch updates.
+type WatchHandler func(context.Context, StoredDesiredConfig) error
+
+// StopFunc stops an active desired-config watch.
+type StopFunc func() error
 
 // Store implements desired-config KV operations backed by JetStream KV.
 type Store struct {
@@ -27,8 +54,8 @@ type Store struct {
 // NewStore creates a desired-config KV store bound to runtime state.
 func NewStore(runtime RuntimeProvider, errorSink func(error)) (*Store, error) {
 	if runtime == nil {
-		return nil, &agentcore.Error{
-			Code:      agentcore.CodeValidation,
+		return nil, &runtimeerr.Error{
+			Code:      runtimeerr.CodeValidation,
 			Op:        "new_kv_store",
 			Message:   "runtime provider is required",
 			Retryable: false,
@@ -38,13 +65,12 @@ func NewStore(runtime RuntimeProvider, errorSink func(error)) (*Store, error) {
 }
 
 // StoreDesiredConfig stores a desired-config record in KV and returns metadata.
-func (s *Store) StoreDesiredConfig(ctx context.Context, rec agentcore.DesiredConfigRecord) (*agentcore.StoredDesiredConfig, error) {
-	if err := contract.ValidateDesiredConfigRecord(rec); err != nil {
+func (s *Store) StoreDesiredConfig(ctx context.Context, rec DesiredConfigRecord) (*StoredDesiredConfig, error) {
+	if err := validateDesiredConfigRecord(rec); err != nil {
 		return nil, err
 	}
 
-	effective := s.runtime.EffectiveConfig()
-	key, err := buildDesiredConfigKey(effective.KV.KeyPattern, rec.Target)
+	key, err := buildDesiredConfigKey(s.runtime.DesiredConfigKeyPattern(), rec.Target)
 	if err != nil {
 		return nil, err
 	}
@@ -54,12 +80,12 @@ func (s *Store) StoreDesiredConfig(ctx context.Context, rec agentcore.DesiredCon
 		return nil, err
 	}
 
-	payload, err := contract.EncodeDesiredConfigRecord(rec)
+	payload, err := encodeDesiredConfigRecord(rec)
 	if err != nil {
 		return nil, err
 	}
 
-	opCtx, cancel := withTimeout(ctx, effective.Timeouts.KVTimeout)
+	opCtx, cancel := withTimeout(ctx, s.runtime.KVTimeout())
 	defer cancel()
 
 	revision, err := kvHandle.Put(opCtx, key, payload)
@@ -78,9 +104,9 @@ func (s *Store) StoreDesiredConfig(ctx context.Context, rec agentcore.DesiredCon
 		s.reportAsync(kvReadError("store_desired_config_post_read", "stored config metadata lookup failed", getErr))
 	}
 
-	stored := &agentcore.StoredDesiredConfig{
+	stored := &StoredDesiredConfig{
 		Record:    rec,
-		Bucket:    effective.KV.Bucket,
+		Bucket:    s.runtime.DesiredConfigBucket(),
 		Key:       key,
 		Revision:  revision,
 		CreatedAt: createdAt,
@@ -89,9 +115,8 @@ func (s *Store) StoreDesiredConfig(ctx context.Context, rec agentcore.DesiredCon
 }
 
 // LoadDesiredConfig loads the latest desired-config record for a target.
-func (s *Store) LoadDesiredConfig(ctx context.Context, target string) (*agentcore.StoredDesiredConfig, error) {
-	effective := s.runtime.EffectiveConfig()
-	key, err := buildDesiredConfigKey(effective.KV.KeyPattern, target)
+func (s *Store) LoadDesiredConfig(ctx context.Context, target string) (*StoredDesiredConfig, error) {
+	key, err := buildDesiredConfigKey(s.runtime.DesiredConfigKeyPattern(), target)
 	if err != nil {
 		return nil, err
 	}
@@ -101,14 +126,14 @@ func (s *Store) LoadDesiredConfig(ctx context.Context, target string) (*agentcor
 		return nil, err
 	}
 
-	opCtx, cancel := withTimeout(ctx, effective.Timeouts.KVTimeout)
+	opCtx, cancel := withTimeout(ctx, s.runtime.KVTimeout())
 	defer cancel()
 
 	entry, err := kvHandle.Get(opCtx, key)
 	if err != nil {
 		if isConfigNotFound(err) {
-			return nil, &agentcore.Error{
-				Code:      agentcore.CodeConfigNotFound,
+			return nil, &runtimeerr.Error{
+				Code:      runtimeerr.CodeConfigNotFound,
 				Op:        "load_desired_config",
 				Key:       key,
 				Message:   "desired config not found",
@@ -119,12 +144,12 @@ func (s *Store) LoadDesiredConfig(ctx context.Context, target string) (*agentcor
 		return nil, kvReadError("load_desired_config", "failed to read desired config from KV", err)
 	}
 
-	rec, err := contract.DecodeDesiredConfigRecord(entry.Value())
+	rec, err := decodeDesiredConfigRecord(entry.Value())
 	if err != nil {
 		return nil, err
 	}
 
-	stored := &agentcore.StoredDesiredConfig{
+	stored := &StoredDesiredConfig{
 		Record:   rec,
 		Bucket:   entry.Bucket(),
 		Key:      entry.Key(),
@@ -167,4 +192,80 @@ func (s *Store) reportAsync(err error) {
 	if s.errorSink != nil {
 		s.errorSink(err)
 	}
+}
+
+func encodeDesiredConfigRecord(rec DesiredConfigRecord) ([]byte, error) {
+	if err := validateDesiredConfigRecord(rec); err != nil {
+		return nil, err
+	}
+	payload, err := json.Marshal(rec)
+	if err != nil {
+		return nil, &runtimeerr.Error{
+			Code:      runtimeerr.CodeEncodeFailed,
+			Op:        "store_desired_config",
+			Message:   "failed to encode desired config",
+			Retryable: false,
+			Err:       err,
+		}
+	}
+	return payload, nil
+}
+
+func decodeDesiredConfigRecord(data []byte) (DesiredConfigRecord, error) {
+	if len(data) == 0 {
+		return DesiredConfigRecord{}, &runtimeerr.Error{
+			Code:      runtimeerr.CodeValidation,
+			Op:        "load_desired_config",
+			Message:   "payload is required",
+			Retryable: false,
+		}
+	}
+
+	var rec DesiredConfigRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		return DesiredConfigRecord{}, &runtimeerr.Error{
+			Code:      runtimeerr.CodeDecodeFailed,
+			Op:        "load_desired_config",
+			Message:   "failed to decode desired config",
+			Retryable: false,
+			Err:       err,
+		}
+	}
+
+	if err := validateDesiredConfigRecord(rec); err != nil {
+		return DesiredConfigRecord{}, err
+	}
+
+	return rec, nil
+}
+
+func validateDesiredConfigRecord(rec DesiredConfigRecord) error {
+	const op = "validate_desired_config_record"
+
+	if strings.TrimSpace(rec.Version) == "" {
+		return validationError(op, "version is required")
+	}
+	if strings.TrimSpace(rec.RPCID) == "" {
+		return validationError(op, "rpc_id is required")
+	}
+	if strings.TrimSpace(rec.Target) == "" {
+		return validationError(op, "target is required")
+	}
+	if strings.TrimSpace(rec.UUID) == "" {
+		return validationError(op, "uuid is required")
+	}
+	if rec.Timestamp.IsZero() {
+		return validationError(op, "timestamp is required")
+	}
+	if len(rec.Payload) == 0 {
+		return validationError(op, "payload is required")
+	}
+	if !json.Valid(rec.Payload) {
+		return validationError(op, "payload must contain valid JSON")
+	}
+	if err := validateToken("validate_target", "target", rec.Target); err != nil {
+		return err
+	}
+
+	return nil
 }

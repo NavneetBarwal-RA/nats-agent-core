@@ -1,8 +1,6 @@
 package session
 
-import "github.com/routerarchitects/nats-agent-core/agentcore"
-
-func (m *Manager) setStateLocked(state agentcore.ConnectionState) {
+func (m *Manager) setStateLocked(state ConnectionState) {
 	m.health.State = state
 	if m.hooks.Metrics != nil {
 		m.hooks.Metrics.SetConnectionState(string(state))
@@ -15,10 +13,10 @@ func (m *Manager) setConnectedLocked(connectedURL string, jsReady, kvReady bool)
 	m.health.KVReady = kvReady
 	m.health.LastError = ""
 	if jsReady && kvReady {
-		m.setStateLocked(agentcore.StateConnected)
+		m.setStateLocked(StateConnected)
 		return
 	}
-	m.setStateLocked(agentcore.StateDegraded)
+	m.setStateLocked(StateDegraded)
 }
 
 func (m *Manager) setReconnectingLocked(lastError error) {
@@ -27,7 +25,7 @@ func (m *Manager) setReconnectingLocked(lastError error) {
 	if lastError != nil {
 		m.health.LastError = lastError.Error()
 	}
-	m.setStateLocked(agentcore.StateReconnecting)
+	m.setStateLocked(StateReconnecting)
 }
 
 func (m *Manager) setDegradedLocked(lastError error) {
@@ -36,7 +34,7 @@ func (m *Manager) setDegradedLocked(lastError error) {
 	if lastError != nil {
 		m.health.LastError = lastError.Error()
 	}
-	m.setStateLocked(agentcore.StateDegraded)
+	m.setStateLocked(StateDegraded)
 }
 
 func (m *Manager) setClosedLocked(lastError error) {
@@ -46,5 +44,5 @@ func (m *Manager) setClosedLocked(lastError error) {
 	if lastError != nil {
 		m.health.LastError = lastError.Error()
 	}
-	m.setStateLocked(agentcore.StateClosed)
+	m.setStateLocked(StateClosed)
 }

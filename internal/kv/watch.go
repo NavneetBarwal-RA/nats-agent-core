@@ -5,23 +5,15 @@ import (
 	"sync"
 
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/routerarchitects/nats-agent-core/agentcore"
-	"github.com/routerarchitects/nats-agent-core/internal/contract"
 )
 
 // WatchDesiredConfig watches desired-config updates for a specific target.
-func (s *Store) WatchDesiredConfig(ctx context.Context, target string, handler agentcore.DesiredConfigWatchHandler) (agentcore.StopFunc, error) {
+func (s *Store) WatchDesiredConfig(ctx context.Context, target string, handler WatchHandler) (StopFunc, error) {
 	if handler == nil {
-		return nil, &agentcore.Error{
-			Code:      agentcore.CodeValidation,
-			Op:        "watch_desired_config",
-			Message:   "watch handler is required",
-			Retryable: false,
-		}
+		return nil, validationError("watch_desired_config", "watch handler is required")
 	}
 
-	effective := s.runtime.EffectiveConfig()
-	key, err := buildDesiredConfigKey(effective.KV.KeyPattern, target)
+	key, err := buildDesiredConfigKey(s.runtime.DesiredConfigKeyPattern(), target)
 	if err != nil {
 		return nil, err
 	}
@@ -31,7 +23,7 @@ func (s *Store) WatchDesiredConfig(ctx context.Context, target string, handler a
 		return nil, err
 	}
 
-	setupCtx, cancelSetup := withTimeout(ctx, effective.Timeouts.KVTimeout)
+	setupCtx, cancelSetup := withTimeout(ctx, s.runtime.KVTimeout())
 	defer cancelSetup()
 
 	watcher, err := kvHandle.Watch(setupCtx, key)
@@ -68,7 +60,7 @@ func (s *Store) WatchDesiredConfig(ctx context.Context, target string, handler a
 	return stop, nil
 }
 
-func (s *Store) consumeWatch(ctx context.Context, watcher jetstream.KeyWatcher, handler agentcore.DesiredConfigWatchHandler) {
+func (s *Store) consumeWatch(ctx context.Context, watcher jetstream.KeyWatcher, handler WatchHandler) {
 	updates := watcher.Updates()
 	for {
 		select {
@@ -85,13 +77,13 @@ func (s *Store) consumeWatch(ctx context.Context, watcher jetstream.KeyWatcher, 
 				continue
 			}
 
-			rec, err := contract.DecodeDesiredConfigRecord(entry.Value())
+			rec, err := decodeDesiredConfigRecord(entry.Value())
 			if err != nil {
 				s.reportAsync(kvReadError("watch_desired_config_decode", "failed to decode desired-config watch entry", err))
 				continue
 			}
 
-			stored := agentcore.StoredDesiredConfig{
+			stored := StoredDesiredConfig{
 				Record:   rec,
 				Bucket:   entry.Bucket(),
 				Key:      entry.Key(),

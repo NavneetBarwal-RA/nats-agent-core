@@ -7,12 +7,14 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/routerarchitects/nats-agent-core/internal/runtimeerr"
 )
 
@@ -407,5 +409,208 @@ Validates:
 func TestDrainConnectionReturnsNilForNilConnection(t *testing.T) {
 	if err := drainConnection(context.Background(), nil, time.Second); err != nil {
 		t.Fatalf("expected nil error, got %v", err)
+	}
+}
+
+/*
+TC-SESSION-MANAGER-013
+Type: Negative
+Title: Start rejects retry_on_failed_connect for synchronous startup
+Summary:
+Verifies that synchronous Start explicitly rejects retry-on-failed-connect mode
+to avoid partially connected startup behavior.
+
+Validates:
+  - Start returns CodeValidation
+  - error op is start
+*/
+func TestStartRejectsRetryOnFailedConnectMode(t *testing.T) {
+	cfg := testSessionConfig()
+	cfg.NATS.RetryOnFailedConnect = true
+
+	m, err := NewManager(cfg, Hooks{})
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+
+	err = m.Start(context.Background())
+	requireSessionRuntimeError(t, err, runtimeerr.CodeValidation, "start", "retry_on_failed_connect is not supported")
+}
+
+/*
+TC-SESSION-MANAGER-014
+Type: Positive
+Title: clampConnectTimeout respects shorter context deadline
+Summary:
+Verifies that connect timeout is clamped to the remaining context deadline when
+the caller deadline is shorter than configured timeout.
+
+Validates:
+  - returned timeout is less than or equal to configured timeout
+  - returned timeout is bounded by context deadline
+*/
+func TestClampConnectTimeoutRespectsShorterContextDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+
+	got, err := clampConnectTimeout(ctx, 5*time.Second)
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if got <= 0 {
+		t.Fatalf("expected positive timeout, got %v", got)
+	}
+	if got > 5*time.Second {
+		t.Fatalf("expected timeout <= configured timeout, got %v", got)
+	}
+	if got > 100*time.Millisecond {
+		t.Fatalf("expected timeout to be clamped near context deadline, got %v", got)
+	}
+}
+
+/*
+TC-SESSION-MANAGER-015
+Type: Negative
+Title: clampConnectTimeout fails for expired context deadline
+Summary:
+Verifies that connect timeout clamp returns a deadline error when context
+deadline is already expired.
+
+Validates:
+  - expired deadline returns context.DeadlineExceeded
+*/
+func TestClampConnectTimeoutRejectsExpiredDeadline(t *testing.T) {
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-1*time.Second))
+	defer cancel()
+
+	_, err := clampConnectTimeout(ctx, 2*time.Second)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context deadline exceeded, got %v", err)
+	}
+}
+
+/*
+TC-SESSION-MANAGER-016
+Type: Positive
+Title: Close waits for in-flight Start and leaves runtime closed
+Summary:
+Verifies that Close does not return before an in-flight Start has resolved and
+that runtime references remain nil after close completes.
+
+Validates:
+  - Close blocks while Start is still connecting
+  - after Start resolves, Close succeeds and runtime remains nil
+  - final health state is closed
+*/
+func TestCloseWaitsForInFlightStartAndLeavesRuntimeClosed(t *testing.T) {
+	originalConnect := natsConnect
+	t.Cleanup(func() {
+		natsConnect = originalConnect
+	})
+
+	connectEntered := make(chan struct{})
+	releaseConnect := make(chan struct{})
+	natsConnect = func(_ string, _ ...nats.Option) (*nats.Conn, error) {
+		close(connectEntered)
+		<-releaseConnect
+		return nil, errors.New("connect failed after close request")
+	}
+
+	m, err := NewManager(testSessionConfig(), Hooks{})
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+
+	startDone := make(chan error, 1)
+	go func() {
+		startDone <- m.Start(context.Background())
+	}()
+
+	select {
+	case <-connectEntered:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected Start to enter connect path")
+	}
+
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- m.Close(context.Background())
+	}()
+
+	select {
+	case err := <-closeDone:
+		t.Fatalf("expected Close to wait for Start completion, got early return: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releaseConnect)
+
+	startErr := <-startDone
+	requireSessionRuntimeError(t, startErr, runtimeerr.CodeConnectionFailed, "start_connect", "failed to connect to NATS")
+
+	if err := <-closeDone; err != nil {
+		t.Fatalf("expected Close to succeed, got %v", err)
+	}
+
+	if m.nc != nil || m.js != nil || m.kv != nil {
+		t.Fatalf("expected runtime handles to be nil after Close, got nc=%#v js=%#v kv=%#v", m.nc, m.js, m.kv)
+	}
+	if got := m.HealthSnapshot().State; got != StateClosed {
+		t.Fatalf("expected state %q, got %q", StateClosed, got)
+	}
+}
+
+/*
+TC-SESSION-MANAGER-017
+Type: Negative
+Title: Start honors context cancellation while connect is blocked
+Summary:
+Verifies that Start returns promptly with a connection failure when context is
+canceled while connect is still in progress.
+
+Validates:
+  - cancellation during connect returns CodeConnectionFailed
+  - error op is start_connect
+  - runtime handles are not published
+*/
+func TestStartHonorsCancellationDuringConnect(t *testing.T) {
+	originalConnect := natsConnect
+	t.Cleanup(func() {
+		natsConnect = originalConnect
+	})
+
+	connectEntered := make(chan struct{})
+	releaseConnect := make(chan struct{})
+	natsConnect = func(_ string, _ ...nats.Option) (*nats.Conn, error) {
+		close(connectEntered)
+		<-releaseConnect
+		return nil, errors.New("late connect failure")
+	}
+
+	m, err := NewManager(testSessionConfig(), Hooks{})
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- m.Start(ctx)
+	}()
+
+	select {
+	case <-connectEntered:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected Start to enter connect path")
+	}
+
+	cancel()
+
+	startErr := <-errCh
+	requireSessionRuntimeError(t, startErr, runtimeerr.CodeConnectionFailed, "start_connect", "failed to connect to NATS")
+	close(releaseConnect)
+
+	if m.nc != nil || m.js != nil || m.kv != nil {
+		t.Fatalf("expected runtime handles to stay nil, got nc=%#v js=%#v kv=%#v", m.nc, m.js, m.kv)
 	}
 }

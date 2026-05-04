@@ -16,6 +16,8 @@ import (
 	"github.com/routerarchitects/nats-agent-core/internal/runtimeerr"
 )
 
+var natsConnect = nats.Connect
+
 // Manager owns the runtime NATS, JetStream, KV, and health session state.
 type Manager struct {
 	mu        sync.RWMutex
@@ -27,9 +29,11 @@ type Manager struct {
 	js jetstream.JetStream
 	kv jetstream.KeyValue
 
-	health   HealthSnapshot
-	starting bool
-	closing  bool
+	health         HealthSnapshot
+	starting       bool
+	startDone      chan struct{}
+	closing        bool
+	closeRequested bool
 }
 
 // NewManager constructs a session manager with normalized runtime defaults.
@@ -109,21 +113,45 @@ func (m *Manager) Start(ctx context.Context) error {
 			Retryable: false,
 		}
 	}
+	if m.closing {
+		m.mu.Unlock()
+		return &runtimeerr.Error{
+			Code:      runtimeerr.CodeShutdown,
+			Op:        "start",
+			Message:   "close already in progress",
+			Retryable: true,
+		}
+	}
+	if m.effective.Config.NATS.RetryOnFailedConnect {
+		m.mu.Unlock()
+		return &runtimeerr.Error{
+			Code:      runtimeerr.CodeValidation,
+			Op:        "start",
+			Message:   "nats.retry_on_failed_connect is not supported by synchronous start",
+			Retryable: false,
+		}
+	}
 	if m.nc != nil && m.nc.Status() != nats.CLOSED {
 		m.mu.Unlock()
 		return nil
 	}
 	m.starting = true
+	startDone := make(chan struct{})
+	m.startDone = startDone
 	m.setStateLocked(StateConnecting)
 	m.mu.Unlock()
 
 	defer func() {
 		m.mu.Lock()
+		if m.startDone == startDone {
+			close(m.startDone)
+			m.startDone = nil
+		}
 		m.starting = false
 		m.mu.Unlock()
 	}()
 
-	nc, err := m.connectNATS()
+	nc, err := m.connectNATS(ctx)
 	if err != nil {
 		m.mu.Lock()
 		m.setDegradedLocked(err)
@@ -135,6 +163,19 @@ func (m *Manager) Start(ctx context.Context) error {
 			Code:      runtimeerr.CodeConnectionFailed,
 			Op:        "start_connect",
 			Message:   "failed to connect to NATS",
+			Retryable: true,
+			Err:       err,
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		nc.Close()
+		m.mu.Lock()
+		m.setDegradedLocked(err)
+		m.mu.Unlock()
+		return &runtimeerr.Error{
+			Code:      runtimeerr.CodeConnectionFailed,
+			Op:        "start_connect",
+			Message:   "start context canceled during connection setup",
 			Retryable: true,
 			Err:       err,
 		}
@@ -174,6 +215,16 @@ func (m *Manager) Start(ctx context.Context) error {
 	}
 
 	m.mu.Lock()
+	if m.closeRequested || m.closing {
+		m.mu.Unlock()
+		nc.Close()
+		return &runtimeerr.Error{
+			Code:      runtimeerr.CodeShutdown,
+			Op:        "start",
+			Message:   "start aborted because close was requested",
+			Retryable: true,
+		}
+	}
 	m.nc = nc
 	m.js = js
 	m.kv = kv
@@ -198,18 +249,46 @@ func (m *Manager) Close(ctx context.Context) error {
 		m.mu.Unlock()
 		return nil
 	}
-	if m.nc == nil {
+
+	m.closing = true
+	m.closeRequested = true
+	startDone := m.startDone
+	nc := m.nc
+	shutdownTimeout := m.effective.Config.Timeouts.ShutdownTimeout
+
+	if startDone == nil && nc == nil {
 		m.setClosedLocked(nil)
+		m.closeRequested = false
+		m.closing = false
 		m.mu.Unlock()
 		return nil
 	}
 
-	m.closing = true
 	m.setStateLocked(StateDraining)
-
-	nc := m.nc
-	shutdownTimeout := m.effective.Config.Timeouts.ShutdownTimeout
 	m.mu.Unlock()
+
+	if startDone != nil {
+		select {
+		case <-startDone:
+		case <-ctx.Done():
+			m.mu.Lock()
+			m.setDegradedLocked(ctx.Err())
+			m.closeRequested = false
+			m.closing = false
+			m.mu.Unlock()
+			return &runtimeerr.Error{
+				Code:      runtimeerr.CodeShutdown,
+				Op:        "close_wait_start",
+				Message:   "close canceled while waiting for startup to finish",
+				Retryable: true,
+				Err:       ctx.Err(),
+			}
+		}
+
+		m.mu.Lock()
+		nc = m.nc
+		m.mu.Unlock()
+	}
 
 	drainErr := drainConnection(ctx, nc, shutdownTimeout)
 	if drainErr != nil {
@@ -220,6 +299,7 @@ func (m *Manager) Close(ctx context.Context) error {
 	m.nc = nil
 	m.js = nil
 	m.kv = nil
+	m.closeRequested = false
 	m.closing = false
 	if drainErr != nil {
 		m.setClosedLocked(drainErr)
@@ -258,20 +338,47 @@ func (m *Manager) KeyValue() (jetstream.KeyValue, error) {
 	return m.kv, nil
 }
 
-func (m *Manager) connectNATS() (*nats.Conn, error) {
-	opts, err := m.buildNATSOptions()
+func (m *Manager) connectNATS(ctx context.Context) (*nats.Conn, error) {
+	timeout, err := clampConnectTimeout(ctx, m.effective.Config.NATS.ConnectTimeout)
+	if err != nil {
+		return nil, err
+	}
+
+	opts, err := m.buildNATSOptions(timeout)
 	if err != nil {
 		return nil, err
 	}
 
 	servers := strings.Join(m.effective.Config.NATS.Servers, ",")
-	return nats.Connect(servers, opts...)
+	type connectResult struct {
+		nc  *nats.Conn
+		err error
+	}
+	done := make(chan connectResult, 1)
+
+	go func() {
+		nc, err := natsConnect(servers, opts...)
+		done <- connectResult{nc: nc, err: err}
+	}()
+
+	select {
+	case result := <-done:
+		return result.nc, result.err
+	case <-ctx.Done():
+		go func() {
+			result := <-done
+			if result.nc != nil {
+				result.nc.Close()
+			}
+		}()
+		return nil, ctx.Err()
+	}
 }
 
-func (m *Manager) buildNATSOptions() ([]nats.Option, error) {
+func (m *Manager) buildNATSOptions(connectTimeout time.Duration) ([]nats.Option, error) {
 	ncfg := m.effective.Config.NATS
 	opts := []nats.Option{
-		nats.Timeout(ncfg.ConnectTimeout),
+		nats.Timeout(connectTimeout),
 		nats.RetryOnFailedConnect(ncfg.RetryOnFailedConnect),
 		nats.MaxReconnects(ncfg.MaxReconnects),
 		nats.ReconnectWait(ncfg.ReconnectWait),
@@ -317,6 +424,23 @@ func (m *Manager) buildNATSOptions() ([]nats.Option, error) {
 	}
 
 	return opts, nil
+}
+
+func clampConnectTimeout(ctx context.Context, configured time.Duration) (time.Duration, error) {
+	timeout := configured
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return timeout, nil
+	}
+
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return 0, context.DeadlineExceeded
+	}
+	if timeout <= 0 || remaining < timeout {
+		return remaining, nil
+	}
+	return timeout, nil
 }
 
 func buildTLSConfig(cfg *TLSConfig) (*tls.Config, error) {

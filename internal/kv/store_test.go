@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -176,6 +177,7 @@ type stubKeyWatcher struct {
 	updates  chan jetstream.KeyValueEntry
 	stopErr  error
 	stopCall int
+	mu       sync.Mutex
 }
 
 func (w *stubKeyWatcher) Updates() <-chan jetstream.KeyValueEntry {
@@ -183,6 +185,9 @@ func (w *stubKeyWatcher) Updates() <-chan jetstream.KeyValueEntry {
 }
 
 func (w *stubKeyWatcher) Stop() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
 	w.stopCall++
 	if w.stopErr != nil {
 		return w.stopErr

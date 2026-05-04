@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -189,17 +190,20 @@ func TestWatchDesiredConfigReportsDecodeFailuresToErrorSink(t *testing.T) {
 		},
 	}
 
-	var sinkErr error
+	sinkErrCh := make(chan error, 1)
 	store, err := NewStore(&stubRuntimeProvider{kv: kvHandle}, func(err error) {
-		sinkErr = err
+		select {
+		case sinkErrCh <- err:
+		default:
+		}
 	})
 	if err != nil {
 		t.Fatalf("expected nil constructor error, got %v", err)
 	}
 
-	handlerCalls := 0
+	var handlerCalls int32
 	stop, err := store.WatchDesiredConfig(context.Background(), "vyos", func(context.Context, StoredDesiredConfig) error {
-		handlerCalls++
+		atomic.AddInt32(&handlerCalls, 1)
 		return nil
 	})
 	if err != nil {
@@ -209,12 +213,14 @@ func TestWatchDesiredConfigReportsDecodeFailuresToErrorSink(t *testing.T) {
 	watcher.updates <- stubKeyValueEntry{bucket: "cfg_desired", key: "desired.vyos", revision: 1, value: []byte(`{"version":`)}
 	close(watcher.updates)
 
-	time.Sleep(20 * time.Millisecond)
-	if handlerCalls != 0 {
-		t.Fatalf("expected handler not to be called, got %d calls", handlerCalls)
-	}
-	if sinkErr == nil {
+	var sinkErr error
+	select {
+	case sinkErr = <-sinkErrCh:
+	case <-time.After(2 * time.Second):
 		t.Fatal("expected decode failure to be reported to error sink")
+	}
+	if got := atomic.LoadInt32(&handlerCalls); got != 0 {
+		t.Fatalf("expected handler not to be called, got %d calls", got)
 	}
 	requireKVRuntimeError(t, sinkErr, runtimeerr.CodeKVReadFailed, "watch_desired_config_decode", "failed to decode desired-config watch entry")
 
@@ -249,9 +255,12 @@ func TestWatchDesiredConfigReportsHandlerErrorsToErrorSink(t *testing.T) {
 		},
 	}
 
-	var sinkErr error
+	sinkErrCh := make(chan error, 1)
 	store, err := NewStore(&stubRuntimeProvider{kv: kvHandle}, func(err error) {
-		sinkErr = err
+		select {
+		case sinkErrCh <- err:
+		default:
+		}
 	})
 	if err != nil {
 		t.Fatalf("expected nil constructor error, got %v", err)
@@ -267,8 +276,10 @@ func TestWatchDesiredConfigReportsHandlerErrorsToErrorSink(t *testing.T) {
 	watcher.updates <- stubKeyValueEntry{bucket: "cfg_desired", key: "desired.vyos", revision: 1, value: payload}
 	close(watcher.updates)
 
-	time.Sleep(20 * time.Millisecond)
-	if sinkErr == nil {
+	var sinkErr error
+	select {
+	case sinkErr = <-sinkErrCh:
+	case <-time.After(2 * time.Second):
 		t.Fatal("expected handler error to be reported to error sink")
 	}
 	requireKVRuntimeError(t, sinkErr, runtimeerr.CodeKVReadFailed, "watch_desired_config_handler", "desired-config watch handler returned error")
@@ -313,7 +324,10 @@ func TestWatchDesiredConfigStopIsIdempotent(t *testing.T) {
 	if err := stop(); err != nil {
 		t.Fatalf("expected second stop to succeed, got %v", err)
 	}
-	if watcher.stopCall != 1 {
-		t.Fatalf("expected watcher Stop to be called once, got %d", watcher.stopCall)
+	watcher.mu.Lock()
+	stopCalls := watcher.stopCall
+	watcher.mu.Unlock()
+	if stopCalls != 1 {
+		t.Fatalf("expected watcher Stop to be called once, got %d", stopCalls)
 	}
 }

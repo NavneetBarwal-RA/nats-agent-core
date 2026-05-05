@@ -118,7 +118,8 @@ func TestWatchDesiredConfigDeliversDecodedEntriesToHandler(t *testing.T) {
 	}
 	createdAt := rec.Timestamp.Add(2 * time.Second)
 
-	watcher := &stubKeyWatcher{updates: make(chan jetstream.KeyValueEntry, 1)}
+	watcher := &stubKeyWatcher{updates: make(chan jetstream.KeyValueEntry, 2)}
+	watcher.updates <- nil
 	kvHandle := &stubKeyValue{
 		watchFn: func(context.Context, string, ...jetstream.WatchOpt) (jetstream.KeyWatcher, error) {
 			return watcher, nil
@@ -183,7 +184,8 @@ Validates:
   - handler is not invoked for malformed payload
 */
 func TestWatchDesiredConfigReportsDecodeFailuresToErrorSink(t *testing.T) {
-	watcher := &stubKeyWatcher{updates: make(chan jetstream.KeyValueEntry, 1)}
+	watcher := &stubKeyWatcher{updates: make(chan jetstream.KeyValueEntry, 2)}
+	watcher.updates <- nil
 	kvHandle := &stubKeyValue{
 		watchFn: func(context.Context, string, ...jetstream.WatchOpt) (jetstream.KeyWatcher, error) {
 			return watcher, nil
@@ -248,7 +250,8 @@ func TestWatchDesiredConfigReportsHandlerErrorsToErrorSink(t *testing.T) {
 		t.Fatalf("failed to marshal record: %v", err)
 	}
 
-	watcher := &stubKeyWatcher{updates: make(chan jetstream.KeyValueEntry, 1)}
+	watcher := &stubKeyWatcher{updates: make(chan jetstream.KeyValueEntry, 2)}
+	watcher.updates <- nil
 	kvHandle := &stubKeyValue{
 		watchFn: func(context.Context, string, ...jetstream.WatchOpt) (jetstream.KeyWatcher, error) {
 			return watcher, nil
@@ -302,7 +305,8 @@ Validates:
   - underlying watcher Stop executes once
 */
 func TestWatchDesiredConfigStopIsIdempotent(t *testing.T) {
-	watcher := &stubKeyWatcher{updates: make(chan jetstream.KeyValueEntry)}
+	watcher := &stubKeyWatcher{updates: make(chan jetstream.KeyValueEntry, 1)}
+	watcher.updates <- nil
 	kvHandle := &stubKeyValue{
 		watchFn: func(context.Context, string, ...jetstream.WatchOpt) (jetstream.KeyWatcher, error) {
 			return watcher, nil

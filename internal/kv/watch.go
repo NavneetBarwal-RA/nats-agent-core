@@ -3,6 +3,7 @@ package kv
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -23,28 +24,30 @@ func (s *Store) WatchDesiredConfig(ctx context.Context, target string, handler W
 		return nil, err
 	}
 
-	setupCtx, cancelSetup := withTimeout(ctx, s.runtime.KVTimeout())
-	defer cancelSetup()
-
-	watcher, err := kvHandle.Watch(setupCtx, key)
-	if err != nil {
-		return nil, kvReadError("watch_desired_config", "failed to start desired-config watch", err)
-	}
-
 	watchCtx, cancelWatch := context.WithCancel(context.Background())
-	done := make(chan struct{})
-
-	go s.consumeWatch(watchCtx, watcher, handler)
-	go func() {
-		<-watchCtx.Done()
-		close(done)
-	}()
-
 	if ctx != nil {
 		go func() {
 			<-ctx.Done()
 			cancelWatch()
 		}()
+	}
+
+	watcher, err := kvHandle.Watch(watchCtx, key)
+	if err != nil {
+		cancelWatch()
+		return nil, kvReadError("watch_desired_config", "failed to start desired-config watch", err)
+	}
+
+	ready := make(chan struct{})
+	done := make(chan struct{})
+
+	go s.consumeWatch(watchCtx, watcher, handler, ready, done)
+
+	if err := waitForWatchReady(ctx, s.runtime.KVTimeout(), ready, done); err != nil {
+		cancelWatch()
+		_ = watcher.Stop()
+		<-done
+		return nil, kvReadError("watch_desired_config", "desired-config watch did not become ready", err)
 	}
 
 	var once sync.Once
@@ -60,7 +63,31 @@ func (s *Store) WatchDesiredConfig(ctx context.Context, target string, handler W
 	return stop, nil
 }
 
-func (s *Store) consumeWatch(ctx context.Context, watcher jetstream.KeyWatcher, handler WatchHandler) {
+func waitForWatchReady(ctx context.Context, timeout time.Duration, ready <-chan struct{}, done <-chan struct{}) error {
+	waitCtx, cancel := withTimeout(ctx, timeout)
+	defer cancel()
+
+	select {
+	case <-ready:
+		return nil
+	case <-done:
+		return context.Canceled
+	case <-waitCtx.Done():
+		return waitCtx.Err()
+	}
+}
+
+func (s *Store) consumeWatch(ctx context.Context, watcher jetstream.KeyWatcher, handler WatchHandler, ready chan<- struct{}, done chan<- struct{}) {
+	defer close(done)
+
+	var readyOnce sync.Once
+	markReady := func() {
+		readyOnce.Do(func() {
+			close(ready)
+		})
+	}
+	defer markReady()
+
 	updates := watcher.Updates()
 	for {
 		select {
@@ -71,6 +98,7 @@ func (s *Store) consumeWatch(ctx context.Context, watcher jetstream.KeyWatcher, 
 				return
 			}
 			if entry == nil {
+				markReady()
 				continue
 			}
 			if len(entry.Value()) == 0 {

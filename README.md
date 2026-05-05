@@ -185,3 +185,19 @@ SubmitConfigure failure semantics are defined in `SPEC.md` section `6.4`.
 ## Build / toolchain note
 
 This repository currently targets Go 1.25.x.
+
+## Testing
+
+This repository includes real-server integration tests for the currently
+implemented Phase 4 runtime/session/KV/recovery behavior.
+
+For local integration runs, `nats-server` must be installed and available in
+`PATH`.
+
+Unit tests:
+
+`go test ./...`
+
+Integration tests:
+
+`go test -count=1 -v -tags=integration ./tests/integration/...`

@@ -176,6 +176,14 @@ The main public APIs currently usable by an owning agent are:
 
 ---
 
+### Current startup limitation
+
+`RetryOnFailedConnect` is not supported by the current synchronous `Start(ctx)` behavior.
+
+If enabled, `Start(ctx)` returns a validation error instead of entering a partially connected retrying startup mode.
+
+---
+
 ## Notes
 
 For the normative design contract and exact behavior, see `SPEC.md`.

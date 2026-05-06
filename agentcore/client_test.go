@@ -469,15 +469,16 @@ func TestCloseBeforeStartMovesHealthToClosed(t *testing.T) {
 /*
 TC-CLIENT-007
 Type: Negative
-Title: Phase 4 APIs return disconnected until runtime is started
+Title: Runtime-backed APIs return disconnected before start while deferred APIs stay not implemented
 Summary:
 Verifies that runtime-backed desired-config APIs fail clearly with
-CodeDisconnected before Start, while remaining deferred APIs still return
-CodeNotImplemented.
+CodeDisconnected before Start, while deferred publish/submit APIs that are not
+yet implemented continue to return CodeNotImplemented.
 
 Validates:
   - runtime-backed desired-config APIs return CodeDisconnected when not started
-  - deferred APIs still return CodeNotImplemented with expected operation names
+  - deferred submit/publish APIs still return CodeNotImplemented with expected operation names
+  - handler registration APIs succeed pre-start and store deferred registration state
 */
 func TestPhase4RuntimeAndDeferredMethodsReturnExpectedErrors(t *testing.T) {
 	client, err := New(testConfig())
@@ -625,34 +626,6 @@ func TestPhase4RuntimeAndDeferredMethodsReturnExpectedErrors(t *testing.T) {
 				return c.PublishStatus(context.Background(), statusMsg)
 			},
 		},
-		{
-			name: "RegisterConfigureHandler",
-			op:   "register_configure_handler",
-			call: func(c *Client) error {
-				return c.RegisterConfigureHandler("vyos", func(context.Context, ConfigureNotification) error { return nil })
-			},
-		},
-		{
-			name: "RegisterActionHandler",
-			op:   "register_action_handler",
-			call: func(c *Client) error {
-				return c.RegisterActionHandler("vyos", "trace", func(context.Context, ActionCommand) error { return nil })
-			},
-		},
-		{
-			name: "RegisterResultHandler",
-			op:   "register_result_handler",
-			call: func(c *Client) error {
-				return c.RegisterResultHandler("vyos", func(context.Context, ResultEnvelope) error { return nil })
-			},
-		},
-		{
-			name: "RegisterStatusHandler",
-			op:   "register_status_handler",
-			call: func(c *Client) error {
-				return c.RegisterStatusHandler("vyos", func(context.Context, StatusEnvelope) error { return nil })
-			},
-		},
 	}
 
 	for _, tc := range deferredTests {
@@ -660,6 +633,51 @@ func TestPhase4RuntimeAndDeferredMethodsReturnExpectedErrors(t *testing.T) {
 			err := tc.call(client)
 			requireNotImplementedError(t, err, tc.op)
 		})
+	}
+
+	registrationTests := []struct {
+		name string
+		call func(*Client) error
+	}{
+		{
+			name: "RegisterConfigureHandler",
+			call: func(c *Client) error {
+				return c.RegisterConfigureHandler("vyos", func(context.Context, ConfigureNotification) error { return nil })
+			},
+		},
+		{
+			name: "RegisterActionHandler",
+			call: func(c *Client) error {
+				return c.RegisterActionHandler("vyos", "trace", func(context.Context, ActionCommand) error { return nil })
+			},
+		},
+		{
+			name: "RegisterResultHandler",
+			call: func(c *Client) error {
+				return c.RegisterResultHandler("vyos", func(context.Context, ResultEnvelope) error { return nil })
+			},
+		},
+		{
+			name: "RegisterStatusHandler",
+			call: func(c *Client) error {
+				return c.RegisterStatusHandler("vyos", func(context.Context, StatusEnvelope) error { return nil })
+			},
+		},
+	}
+
+	for _, tc := range registrationTests {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.call(client); err != nil {
+				t.Fatalf("expected nil pre-start registration error, got %v", err)
+			}
+		})
+	}
+
+	if got := client.Health().RegisteredSubscriptions; got != 4 {
+		t.Fatalf("expected RegisteredSubscriptions %d, got %d", 4, got)
+	}
+	if got := client.Health().ActiveSubscriptions; got != 0 {
+		t.Fatalf("expected ActiveSubscriptions %d before start, got %d", 0, got)
 	}
 }
 

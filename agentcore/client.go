@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/routerarchitects/nats-agent-core/internal/kv"
+	"github.com/routerarchitects/nats-agent-core/internal/registry"
 	"github.com/routerarchitects/nats-agent-core/internal/runtimeerr"
 	"github.com/routerarchitects/nats-agent-core/internal/session"
 )
@@ -93,8 +94,14 @@ type Client struct {
 	session *session.Manager
 	kv      *kv.Store
 
+	subMu         sync.Mutex
+	subscriptions *registry.Registry
+	subPatterns   subscriptionSubjectPatterns
+
 	nextWatchID uint64
 	watches     map[uint64]StopFunc
+
+	callbacksEnabled atomic.Bool
 }
 
 // New validates public options and constructs a bootstrap client facade.
@@ -118,6 +125,11 @@ func New(cfg Config, opts ...Option) (*Client, error) {
 		options.metrics = cfg.Observe.Metrics
 	}
 
+	subPatterns, err := resolveSubscriptionSubjectPatterns(cfg.Subjects)
+	if err != nil {
+		return nil, err
+	}
+
 	runtime, err := session.NewManager(toSessionConfig(cfg), session.Hooks{
 		Logger:    options.logger,
 		Metrics:   options.metrics,
@@ -132,13 +144,19 @@ func New(cfg Config, opts ...Option) (*Client, error) {
 		return nil, toPublicError(err)
 	}
 
-	return &Client{
-		cfg:     cfg,
-		options: options,
-		session: runtime,
-		kv:      store,
-		watches: make(map[uint64]StopFunc),
-	}, nil
+	client := &Client{
+		cfg:           cfg,
+		options:       options,
+		session:       runtime,
+		kv:            store,
+		subscriptions: registry.New(),
+		subPatterns:   subPatterns,
+		watches:       make(map[uint64]StopFunc),
+	}
+	client.syncSubscriptionHealth()
+	runtime.SetReconnectHandler(client.onSessionReconnected)
+
+	return client, nil
 }
 
 // Config returns the bootstrap configuration snapshot.
@@ -150,15 +168,25 @@ func (c *Client) Config() Config {
 
 // Start begins the client lifecycle.
 func (c *Client) Start(ctx context.Context) error {
-	return toPublicError(c.session.Start(ctx))
+	if err := toPublicError(c.session.Start(ctx)); err != nil {
+		return err
+	}
+
+	c.callbacksEnabled.Store(true)
+	return c.activateAllRegisteredSubscriptions("start")
 }
 
 // Close ends the client lifecycle with watch cleanup and connection drain.
 func (c *Client) Close(ctx context.Context) error {
+	c.callbacksEnabled.Store(false)
+	subErr := c.deactivateAllSubscriptions("close")
 	watchErr := c.stopAllWatches()
 	sessionErr := toPublicError(c.session.Close(ctx))
 
-	if watchErr != nil && sessionErr == nil {
+	if subErr != nil && watchErr == nil && sessionErr == nil {
+		return subErr
+	}
+	if watchErr != nil && sessionErr == nil && subErr == nil {
 		return &Error{
 			Code:      CodeShutdown,
 			Op:        "close_stop_watches",
@@ -167,13 +195,14 @@ func (c *Client) Close(ctx context.Context) error {
 			Err:       watchErr,
 		}
 	}
-	if watchErr != nil && sessionErr != nil {
+	if subErr != nil || watchErr != nil || sessionErr != nil {
+		joined := errors.Join(subErr, watchErr, sessionErr)
 		return &Error{
 			Code:      CodeShutdown,
 			Op:        "close",
-			Message:   "close failed with watch-stop and session shutdown errors",
+			Message:   "close failed with subscription, watch-stop, or session shutdown errors",
 			Retryable: true,
-			Err:       errors.Join(watchErr, sessionErr),
+			Err:       joined,
 		}
 	}
 	return sessionErr
@@ -299,59 +328,22 @@ func (c *Client) StartupReconcile(ctx context.Context, target string) (*StoredDe
 
 // RegisterConfigureHandler registers a configure notification handler.
 func (c *Client) RegisterConfigureHandler(target string, handler ConfigureHandler, opts ...SubscriptionOption) error {
-	_ = target
-	_ = handler
-	_ = opts
-
-	return &Error{
-		Code:      CodeNotImplemented,
-		Op:        "register_configure_handler",
-		Message:   "RegisterConfigureHandler is not implemented in bootstrap phase",
-		Retryable: false,
-	}
+	return c.registerConfigureHandler(target, handler, opts...)
 }
 
 // RegisterActionHandler registers a target/action handler.
 func (c *Client) RegisterActionHandler(target, action string, handler ActionHandler, opts ...SubscriptionOption) error {
-	_ = target
-	_ = action
-	_ = handler
-	_ = opts
-
-	return &Error{
-		Code:      CodeNotImplemented,
-		Op:        "register_action_handler",
-		Message:   "RegisterActionHandler is not implemented in bootstrap phase",
-		Retryable: false,
-	}
+	return c.registerActionHandler(target, action, handler, opts...)
 }
 
 // RegisterResultHandler registers a result handler.
 func (c *Client) RegisterResultHandler(target string, handler ResultHandler, opts ...SubscriptionOption) error {
-	_ = target
-	_ = handler
-	_ = opts
-
-	return &Error{
-		Code:      CodeNotImplemented,
-		Op:        "register_result_handler",
-		Message:   "RegisterResultHandler is not implemented in bootstrap phase",
-		Retryable: false,
-	}
+	return c.registerResultHandler(target, handler, opts...)
 }
 
 // RegisterStatusHandler registers a status handler.
 func (c *Client) RegisterStatusHandler(target string, handler StatusHandler, opts ...SubscriptionOption) error {
-	_ = target
-	_ = handler
-	_ = opts
-
-	return &Error{
-		Code:      CodeNotImplemented,
-		Op:        "register_status_handler",
-		Message:   "RegisterStatusHandler is not implemented in bootstrap phase",
-		Retryable: false,
-	}
+	return c.registerStatusHandler(target, handler, opts...)
 }
 
 func (c *Client) trackWatch(stop StopFunc) StopFunc {

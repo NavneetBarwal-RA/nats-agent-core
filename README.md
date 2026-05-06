@@ -40,6 +40,7 @@ This repository currently includes:
 - Phase 2 contract, codec, and validation helpers
 - Phase 3 subject helpers and publish-path foundations
 - Phase 4 session, JetStream, KV, health, and recovery support
+- Phase 5 subscribe wrappers, handler runtime wiring, and reconnect-safe subscription restore
 
 Current code includes:
 - public config, model, error, logger, and metrics types
@@ -57,12 +58,20 @@ Current code includes:
   - `LoadDesiredConfig(...)`
   - `WatchDesiredConfig(...)`
   - `StartupReconcile(...)`
+- public handler registration APIs:
+  - `RegisterConfigureHandler(...)`
+  - `RegisterActionHandler(...)`
+  - `RegisterResultHandler(...)`
+  - `RegisterStatusHandler(...)`
+- optional queue-group subscription option:
+  - `WithQueueGroup(...)`
+- deferred registration support before `Start(ctx)`
+- reconnect-safe subscription restoration from in-memory registry intent
+- receive-side callback decode/validate/dispatch for configure/action/result/status
+- receive-side result correlation via preserved `rpc_id` in `ResultEnvelope`
 
 Still deferred to later phases:
 - submit/publish wrappers for configure, action, result, and status
-- subscribe wrappers and handler registration
-- reconnect-safe subscription restore
-- receive-side result correlation helpers
 - integration examples / full quick-start flows
 
 ---
@@ -78,15 +87,17 @@ The library currently helps agents:
 - load desired configuration from JetStream KV
 - optionally watch desired configuration updates
 - retrieve the latest desired configuration for startup reconciliation
+- register configure/action/result/status handlers before or after `Start(ctx)`
+- restore handler subscriptions after reconnect without manual re-registration
+- receive typed configure/action/result/status messages through callback binding
+- correlate received results using preserved `rpc_id`
 
 ## What is planned next
 
 Later phases are intended to add:
 - configure/action submit wrappers
 - result/status publish wrappers
-- subscribe wrappers and handler registration
-- reconnect-safe subscription restoration
-- receive-side result correlation helpers
+- integration examples / fuller quick-start flows
 
 ---
 
@@ -110,8 +121,8 @@ The library is designed around the idea that agents use shared transport/state h
 The flows below describe the intended library communication model.
 
 As of the current implementation:
-- session startup, JetStream/KV access, desired-config store/load/watch, and startup reconciliation are implemented
-- configure/action submit wrappers and receive-side handler flows are still planned for later phases
+- session startup, JetStream/KV access, desired-config store/load/watch, startup reconciliation, and receive-side handler flows are implemented
+- configure/action submit wrappers and result/status publish wrappers are still planned for later phases
 
 ### Configure flow
 
@@ -173,6 +184,10 @@ The main public APIs currently usable by an owning agent are:
 - `LoadDesiredConfig(...)`
 - `WatchDesiredConfig(...)`
 - `StartupReconcile(...)`
+- `RegisterConfigureHandler(...)`
+- `RegisterActionHandler(...)`
+- `RegisterResultHandler(...)`
+- `RegisterStatusHandler(...)`
 
 ---
 

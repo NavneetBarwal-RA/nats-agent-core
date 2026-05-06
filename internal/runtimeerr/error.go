@@ -15,6 +15,8 @@ const (
 	CodeConfigNotFound   Code = "config_not_found"
 	CodeDecodeFailed     Code = "decode_failed"
 	CodeEncodeFailed     Code = "encode_failed"
+	CodeSubscribeFailed  Code = "subscribe_failed"
+	CodeRegistryConflict Code = "registry_conflict"
 	CodeShutdown         Code = "shutdown"
 )
 

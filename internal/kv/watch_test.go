@@ -335,3 +335,49 @@ func TestWatchDesiredConfigStopIsIdempotent(t *testing.T) {
 		t.Fatalf("expected watcher Stop to be called once, got %d", stopCalls)
 	}
 }
+
+/*
+TC-KV-WATCH-008
+Type: Positive
+Title: WatchDesiredConfig remains stoppable after parent context cancellation
+Summary:
+Verifies that parent context cancellation still stops the watch path and the
+returned stop function completes cleanly without blocking.
+
+Validates:
+  - parent context cancellation propagates to watch cancellation
+  - subsequent stop call returns without blocking
+*/
+func TestWatchDesiredConfigParentCancellationStopsWatchPath(t *testing.T) {
+	watcher := &stubKeyWatcher{updates: make(chan jetstream.KeyValueEntry, 1)}
+	watcher.updates <- nil
+	kvHandle := &stubKeyValue{
+		watchFn: func(context.Context, string, ...jetstream.WatchOpt) (jetstream.KeyWatcher, error) {
+			return watcher, nil
+		},
+	}
+	store, err := NewStore(&stubRuntimeProvider{kv: kvHandle}, nil)
+	if err != nil {
+		t.Fatalf("expected nil constructor error, got %v", err)
+	}
+
+	parentCtx, cancel := context.WithCancel(context.Background())
+	stop, err := store.WatchDesiredConfig(parentCtx, "vyos", func(context.Context, StoredDesiredConfig) error { return nil })
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+
+	cancel()
+
+	stopDone := make(chan struct{})
+	go func() {
+		_ = stop()
+		close(stopDone)
+	}()
+
+	select {
+	case <-stopDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected stop to complete after parent cancellation")
+	}
+}

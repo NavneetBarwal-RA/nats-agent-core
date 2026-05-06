@@ -25,10 +25,14 @@ func (s *Store) WatchDesiredConfig(ctx context.Context, target string, handler W
 	}
 
 	watchCtx, cancelWatch := context.WithCancel(context.Background())
-	if ctx != nil {
+	if ctx != nil && ctx.Done() != nil {
+		parentDone := ctx.Done()
 		go func() {
-			<-ctx.Done()
-			cancelWatch()
+			select {
+			case <-parentDone:
+				cancelWatch()
+			case <-watchCtx.Done():
+			}
 		}()
 	}
 

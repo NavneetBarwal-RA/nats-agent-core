@@ -514,3 +514,89 @@ func TestStartEnablesCallbacksAfterSuccessfulActivation(t *testing.T) {
 		t.Fatalf("expected ActiveSubscriptions %d after activation, got %d", 1, got)
 	}
 }
+
+/*
+TC-CLIENT-HANDLERS-010
+Type: Positive
+Title: Handler registration uses configured custom subject patterns
+Summary:
+Verifies that registration subject construction honors custom subject patterns
+configured on client creation while preserving target-first token binding.
+
+Validates:
+  - configure action result and status subjects use configured patterns
+*/
+func TestRegisterHandlersUseConfiguredCustomSubjectPatterns(t *testing.T) {
+	cfg := testConfig()
+	cfg.Subjects.ConfigurePattern = "custom.configure.%s"
+	cfg.Subjects.ActionPattern = "custom.action.%s.%s"
+	cfg.Subjects.ResultPattern = "custom.result.%s"
+	cfg.Subjects.StatusPattern = "custom.status.%s"
+
+	client, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New returned unexpected error: %v", err)
+	}
+
+	if err := client.RegisterConfigureHandler("vyos", func(context.Context, ConfigureNotification) error { return nil }); err != nil {
+		t.Fatalf("expected nil configure registration error, got %v", err)
+	}
+	if err := client.RegisterActionHandler("vyos", "trace", func(context.Context, ActionCommand) error { return nil }); err != nil {
+		t.Fatalf("expected nil action registration error, got %v", err)
+	}
+	if err := client.RegisterResultHandler("vyos", func(context.Context, ResultEnvelope) error { return nil }); err != nil {
+		t.Fatalf("expected nil result registration error, got %v", err)
+	}
+	if err := client.RegisterStatusHandler("vyos", func(context.Context, StatusEnvelope) error { return nil }); err != nil {
+		t.Fatalf("expected nil status registration error, got %v", err)
+	}
+
+	snapshots := client.subscriptions.List()
+	if len(snapshots) != 4 {
+		t.Fatalf("expected %d registry entries, got %d", 4, len(snapshots))
+	}
+
+	gotBySubject := make(map[string]registry.Snapshot, len(snapshots))
+	for _, snap := range snapshots {
+		gotBySubject[snap.Subject] = snap
+	}
+
+	if _, ok := gotBySubject["custom.configure.vyos"]; !ok {
+		t.Fatalf("expected configure subject %q in registry", "custom.configure.vyos")
+	}
+	if _, ok := gotBySubject["custom.action.vyos.trace"]; !ok {
+		t.Fatalf("expected action subject %q in registry", "custom.action.vyos.trace")
+	}
+	if _, ok := gotBySubject["custom.result.vyos"]; !ok {
+		t.Fatalf("expected result subject %q in registry", "custom.result.vyos")
+	}
+	if _, ok := gotBySubject["custom.status.vyos"]; !ok {
+		t.Fatalf("expected status subject %q in registry", "custom.status.vyos")
+	}
+}
+
+/*
+TC-CLIENT-HANDLERS-011
+Type: Negative
+Title: New rejects invalid configured subject patterns during bootstrap
+Summary:
+Verifies that invalid configured subject patterns fail fast during New(...) and
+surface a typed validation error before runtime/session initialization.
+
+Validates:
+  - malformed action subject pattern returns CodeValidation
+  - error op remains validate_subject_pattern
+*/
+func TestNewRejectsInvalidConfiguredSubjectPatterns(t *testing.T) {
+	cfg := testConfig()
+	cfg.Subjects.ActionPattern = "cmd.action.%s"
+
+	_, err := New(cfg)
+	got := requireErrorCode(t, err, CodeValidation)
+	if got.Op != "validate_subject_pattern" {
+		t.Fatalf("expected error op %q, got %q", "validate_subject_pattern", got.Op)
+	}
+	if !strings.Contains(got.Message, "action_pattern placeholder count is invalid") {
+		t.Fatalf("expected error message to mention invalid action pattern placeholders, got %q", got.Message)
+	}
+}

@@ -134,7 +134,7 @@ func (c *ConfigurePaths) SubmitConfigure(ctx context.Context, cmd agentcore.Conf
 	}
 	configureSubject, err := c.publishPaths.subjects.ConfigureSubject(cmd.Target)
 	if err != nil {
-		return nil, err
+		return nil, toPublicError(err)
 	}
 
 	notification := agentcore.ConfigureNotification{
@@ -202,7 +202,7 @@ func buildKVKey(pattern, target string) (string, error) {
 		}
 	}
 	if err := subjects.ValidateTarget(target); err != nil {
-		return "", err
+		return "", toPublicError(err)
 	}
 	return fmt.Sprintf(trimmedPattern, target), nil
 }

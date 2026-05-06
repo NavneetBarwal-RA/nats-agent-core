@@ -40,7 +40,7 @@ func NewPublishPaths(builder *subjects.Builder) (*PublishPaths, error) {
 func (p *PublishPaths) PublishConfigureNotification(ctx context.Context, publisher Publisher, msg agentcore.ConfigureNotification) error {
 	subject, err := p.subjects.ConfigureSubject(msg.Target)
 	if err != nil {
-		return err
+		return toPublicError(err)
 	}
 	payload, err := contract.EncodeConfigureNotification(msg)
 	if err != nil {
@@ -53,7 +53,7 @@ func (p *PublishPaths) PublishConfigureNotification(ctx context.Context, publish
 func (p *PublishPaths) SubmitAction(ctx context.Context, publisher Publisher, cmd agentcore.ActionCommand) (*agentcore.SubmissionAck, error) {
 	subject, err := p.subjects.ActionSubject(cmd.Target, cmd.Action)
 	if err != nil {
-		return nil, err
+		return nil, toPublicError(err)
 	}
 	payload, err := contract.EncodeActionCommand(cmd)
 	if err != nil {
@@ -81,7 +81,7 @@ func (p *PublishPaths) SubmitAction(ctx context.Context, publisher Publisher, cm
 func (p *PublishPaths) PublishResult(ctx context.Context, publisher Publisher, msg agentcore.ResultEnvelope) error {
 	subject, err := p.subjects.ResultSubject(msg.Target)
 	if err != nil {
-		return err
+		return toPublicError(err)
 	}
 	payload, err := contract.EncodeResultEnvelope(msg)
 	if err != nil {
@@ -94,7 +94,7 @@ func (p *PublishPaths) PublishResult(ctx context.Context, publisher Publisher, m
 func (p *PublishPaths) PublishStatus(ctx context.Context, publisher Publisher, msg agentcore.StatusEnvelope) error {
 	subject, err := p.subjects.StatusSubject(msg.Target)
 	if err != nil {
-		return err
+		return toPublicError(err)
 	}
 	payload, err := contract.EncodeStatusEnvelope(msg)
 	if err != nil {

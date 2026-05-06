@@ -3,7 +3,7 @@ package subjects
 import (
 	"testing"
 
-	"github.com/routerarchitects/nats-agent-core/agentcore"
+	"github.com/routerarchitects/nats-agent-core/internal/runtimeerr"
 )
 
 /*
@@ -50,7 +50,7 @@ Validates:
   - empty config returns default configure action result status and health patterns
 */
 func TestPatternsFromConfigPreservesDefaultsForEmptyConfig(t *testing.T) {
-	got, err := PatternsFromConfig(agentcore.SubjectConfig{})
+	got, err := PatternsFromConfig(Config{})
 	if err != nil {
 		t.Fatalf("expected nil error, got %v", err)
 	}
@@ -74,7 +74,7 @@ Validates:
   - valid override set passes pattern validation
 */
 func TestPatternsFromConfigAcceptsValidOverrides(t *testing.T) {
-	cfg := agentcore.SubjectConfig{
+	cfg := Config{
 		ConfigurePattern: "custom.cfg.%s",
 		ActionPattern:    "custom.act.%s.%s",
 		ResultPattern:    "custom.result.%s",
@@ -117,7 +117,7 @@ Validates:
   - unspecified patterns remain at defaults
 */
 func TestPatternsFromConfigPreservesDefaultsForPartialOverrides(t *testing.T) {
-	cfg := agentcore.SubjectConfig{
+	cfg := Config{
 		ConfigurePattern: "custom.cfg.%s",
 	}
 
@@ -156,12 +156,12 @@ Validates:
   - error preserves subject-pattern validator op
 */
 func TestPatternsFromConfigRejectsInvalidConfiguredPatterns(t *testing.T) {
-	cfg := agentcore.SubjectConfig{
+	cfg := Config{
 		ActionPattern: "cmd.action.%s",
 	}
 
 	_, err := PatternsFromConfig(cfg)
-	requireAgentcoreError(t, err, agentcore.CodeValidation, "validate_subject_pattern", "action_pattern placeholder count is invalid")
+	requireRuntimeError(t, err, runtimeerr.CodeValidation, "validate_subject_pattern", "action_pattern placeholder count is invalid")
 }
 
 /*
@@ -201,7 +201,7 @@ func TestNewBuilderRejectsInvalidPatterns(t *testing.T) {
 	patterns.ConfigurePattern = "cmd.configure.*"
 
 	_, err := NewBuilder(patterns)
-	requireAgentcoreError(t, err, agentcore.CodeValidation, "validate_subject_pattern", "configure_pattern cannot contain wildcard tokens")
+	requireRuntimeError(t, err, runtimeerr.CodeValidation, "validate_subject_pattern", "configure_pattern cannot contain wildcard tokens")
 }
 
 /*
@@ -363,7 +363,7 @@ func TestBuilderMethodsRejectInvalidTargetAndAction(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			err := tc.call()
-			requireAgentcoreError(t, err, agentcore.CodeValidation, tc.wantOp, tc.msgPart)
+			requireRuntimeError(t, err, runtimeerr.CodeValidation, tc.wantOp, tc.msgPart)
 		})
 	}
 }

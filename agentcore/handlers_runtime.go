@@ -7,25 +7,10 @@ import (
 	"fmt"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/nats-io/nats.go"
 	"github.com/routerarchitects/nats-agent-core/internal/registry"
 )
-
-const (
-	defaultConfigurePattern = "cmd.configure.%s"
-	defaultActionPattern    = "cmd.action.%s.%s"
-	defaultResultPattern    = "result.%s"
-	defaultStatusPattern    = "status.%s"
-)
-
-type subscriptionSubjectPatterns struct {
-	configure string
-	action    string
-	result    string
-	status    string
-}
 
 // WithQueueGroup sets the optional queue group used by a subscription registration.
 func WithQueueGroup(queueGroup string) SubscriptionOption {
@@ -37,79 +22,13 @@ func WithQueueGroup(queueGroup string) SubscriptionOption {
 	}
 }
 
-func resolveSubscriptionSubjectPatterns(cfg SubjectConfig) (subscriptionSubjectPatterns, error) {
-	p := subscriptionSubjectPatterns{
-		configure: defaultConfigurePattern,
-		action:    defaultActionPattern,
-		result:    defaultResultPattern,
-		status:    defaultStatusPattern,
-	}
-	if strings.TrimSpace(cfg.ConfigurePattern) != "" {
-		p.configure = cfg.ConfigurePattern
-	}
-	if strings.TrimSpace(cfg.ActionPattern) != "" {
-		p.action = cfg.ActionPattern
-	}
-	if strings.TrimSpace(cfg.ResultPattern) != "" {
-		p.result = cfg.ResultPattern
-	}
-	if strings.TrimSpace(cfg.StatusPattern) != "" {
-		p.status = cfg.StatusPattern
-	}
-
-	if err := validateSubjectPattern("validate_subject_pattern", "configure_pattern", p.configure, 1); err != nil {
-		return subscriptionSubjectPatterns{}, err
-	}
-	if err := validateSubjectPattern("validate_subject_pattern", "action_pattern", p.action, 2); err != nil {
-		return subscriptionSubjectPatterns{}, err
-	}
-	if err := validateSubjectPattern("validate_subject_pattern", "result_pattern", p.result, 1); err != nil {
-		return subscriptionSubjectPatterns{}, err
-	}
-	if err := validateSubjectPattern("validate_subject_pattern", "status_pattern", p.status, 1); err != nil {
-		return subscriptionSubjectPatterns{}, err
-	}
-	return p, nil
-}
-
-func (p subscriptionSubjectPatterns) configureSubject(target string) (string, error) {
-	if err := validateSubjectToken("validate_target", "target", target, true); err != nil {
-		return "", err
-	}
-	return fmt.Sprintf(p.configure, target), nil
-}
-
-func (p subscriptionSubjectPatterns) actionSubject(target, action string) (string, error) {
-	if err := validateSubjectToken("validate_target", "target", target, true); err != nil {
-		return "", err
-	}
-	if err := validateSubjectToken("validate_action", "action", action, true); err != nil {
-		return "", err
-	}
-	return fmt.Sprintf(p.action, target, action), nil
-}
-
-func (p subscriptionSubjectPatterns) resultSubject(target string) (string, error) {
-	if err := validateSubjectToken("validate_target", "target", target, true); err != nil {
-		return "", err
-	}
-	return fmt.Sprintf(p.result, target), nil
-}
-
-func (p subscriptionSubjectPatterns) statusSubject(target string) (string, error) {
-	if err := validateSubjectToken("validate_target", "target", target, true); err != nil {
-		return "", err
-	}
-	return fmt.Sprintf(p.status, target), nil
-}
-
 func (c *Client) registerConfigureHandler(target string, handler ConfigureHandler, opts ...SubscriptionOption) error {
 	if handler == nil {
 		return validationError("register_configure_handler", "configure handler is required")
 	}
-	subject, err := c.subPatterns.configureSubject(target)
+	subject, err := c.subjects.ConfigureSubject(target)
 	if err != nil {
-		return err
+		return toPublicError(err)
 	}
 	subOpts, err := resolveSubscriptionOptions(opts...)
 	if err != nil {
@@ -144,9 +63,9 @@ func (c *Client) registerActionHandler(target, action string, handler ActionHand
 	if handler == nil {
 		return validationError("register_action_handler", "action handler is required")
 	}
-	subject, err := c.subPatterns.actionSubject(target, action)
+	subject, err := c.subjects.ActionSubject(target, action)
 	if err != nil {
-		return err
+		return toPublicError(err)
 	}
 	subOpts, err := resolveSubscriptionOptions(opts...)
 	if err != nil {
@@ -182,9 +101,9 @@ func (c *Client) registerResultHandler(target string, handler ResultHandler, opt
 	if handler == nil {
 		return validationError("register_result_handler", "result handler is required")
 	}
-	subject, err := c.subPatterns.resultSubject(target)
+	subject, err := c.subjects.ResultSubject(target)
 	if err != nil {
-		return err
+		return toPublicError(err)
 	}
 	subOpts, err := resolveSubscriptionOptions(opts...)
 	if err != nil {
@@ -219,9 +138,9 @@ func (c *Client) registerStatusHandler(target string, handler StatusHandler, opt
 	if handler == nil {
 		return validationError("register_status_handler", "status handler is required")
 	}
-	subject, err := c.subPatterns.statusSubject(target)
+	subject, err := c.subjects.StatusSubject(target)
 	if err != nil {
-		return err
+		return toPublicError(err)
 	}
 	subOpts, err := resolveSubscriptionOptions(opts...)
 	if err != nil {
@@ -824,52 +743,6 @@ func resolveSubscriptionOptions(opts ...SubscriptionOption) (SubscriptionOptions
 		return SubscriptionOptions{}, validationError("register_handler_options", "queue group cannot contain whitespace")
 	}
 	return out, nil
-}
-
-func validateSubjectPattern(op, field, pattern string, placeholders int) error {
-	if strings.TrimSpace(pattern) == "" {
-		return validationError(op, field+" is required")
-	}
-	if strings.ContainsAny(pattern, " \t\r\n") {
-		return validationError(op, field+" cannot contain whitespace")
-	}
-	if strings.Contains(pattern, "*") || strings.Contains(pattern, ">") {
-		return validationError(op, field+" cannot contain wildcard tokens")
-	}
-	count := strings.Count(pattern, "%s")
-	if count != placeholders {
-		return validationError(op, field+" placeholder count is invalid")
-	}
-	residual := strings.ReplaceAll(pattern, "%s", "")
-	if strings.Contains(residual, "%") {
-		return validationError(op, field+" contains unsupported format directives")
-	}
-	return nil
-}
-
-func validateSubjectToken(op, field, value string, required bool) error {
-	if strings.TrimSpace(value) == "" {
-		if required {
-			return validationError(op, field+" is required")
-		}
-		return nil
-	}
-	if strings.ContainsAny(value, " \t\r\n") {
-		return validationError(op, field+" cannot contain whitespace")
-	}
-	if strings.Contains(value, ".") {
-		return validationError(op, field+" cannot contain '.'")
-	}
-	if strings.Contains(value, "*") || strings.Contains(value, ">") {
-		return validationError(op, field+" cannot contain wildcard tokens")
-	}
-	for _, r := range value {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-' {
-			continue
-		}
-		return validationError(op, field+" contains unsupported characters")
-	}
-	return nil
 }
 
 func requiredString(op, field, value string) error {

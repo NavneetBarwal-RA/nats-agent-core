@@ -12,6 +12,7 @@ import (
 	"github.com/routerarchitects/nats-agent-core/internal/registry"
 	"github.com/routerarchitects/nats-agent-core/internal/runtimeerr"
 	"github.com/routerarchitects/nats-agent-core/internal/session"
+	"github.com/routerarchitects/nats-agent-core/internal/subjects"
 )
 
 // ConfigureHandler handles configure notifications for a target.
@@ -96,7 +97,7 @@ type Client struct {
 
 	subMu         sync.Mutex
 	subscriptions *registry.Registry
-	subPatterns   subscriptionSubjectPatterns
+	subjects      *subjects.Builder
 
 	nextWatchID uint64
 	watches     map[uint64]StopFunc
@@ -129,9 +130,20 @@ func New(cfg Config, opts ...Option) (*Client, error) {
 		options.metrics = cfg.Observe.Metrics
 	}
 
-	subPatterns, err := resolveSubscriptionSubjectPatterns(cfg.Subjects)
+	subPatterns, err := subjects.PatternsFromConfig(subjects.Config{
+		ConfigurePattern: cfg.Subjects.ConfigurePattern,
+		ActionPattern:    cfg.Subjects.ActionPattern,
+		ResultPattern:    cfg.Subjects.ResultPattern,
+		StatusPattern:    cfg.Subjects.StatusPattern,
+		HealthPattern:    cfg.Subjects.HealthPattern,
+	})
 	if err != nil {
-		return nil, err
+		return nil, toPublicError(err)
+	}
+
+	subjectBuilder, err := subjects.NewBuilder(subPatterns)
+	if err != nil {
+		return nil, toPublicError(err)
 	}
 
 	runtime, err := session.NewManager(toSessionConfig(cfg), session.Hooks{
@@ -154,7 +166,7 @@ func New(cfg Config, opts ...Option) (*Client, error) {
 		session:       runtime,
 		kv:            store,
 		subscriptions: registry.New(),
-		subPatterns:   subPatterns,
+		subjects:      subjectBuilder,
 		watches:       make(map[uint64]StopFunc),
 	}
 	client.syncSubscriptionHealth()

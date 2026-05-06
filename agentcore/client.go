@@ -102,6 +102,10 @@ type Client struct {
 	watches     map[uint64]StopFunc
 
 	callbacksEnabled atomic.Bool
+
+	startSessionFn               func(context.Context) error
+	activateAllSubscriptionsFn   func(string) error
+	deactivateAllSubscriptionsFn func(string) error
 }
 
 // New validates public options and constructs a bootstrap client facade.
@@ -168,18 +172,29 @@ func (c *Client) Config() Config {
 
 // Start begins the client lifecycle.
 func (c *Client) Start(ctx context.Context) error {
-	if err := toPublicError(c.session.Start(ctx)); err != nil {
+	if err := c.startSession(ctx); err != nil {
+		return err
+	}
+
+	if err := c.activateAllSubscriptions("start"); err != nil {
+		c.callbacksEnabled.Store(false)
+		if cleanupErr := c.deactivateAllSubscriptionsWithOp("start_activation_cleanup"); cleanupErr != nil {
+			c.logWarn("failed to cleanup subscriptions after start activation failure", "error", cleanupErr)
+			if c.options.errorSink != nil {
+				c.options.errorSink(cleanupErr)
+			}
+		}
 		return err
 	}
 
 	c.callbacksEnabled.Store(true)
-	return c.activateAllRegisteredSubscriptions("start")
+	return nil
 }
 
 // Close ends the client lifecycle with watch cleanup and connection drain.
 func (c *Client) Close(ctx context.Context) error {
 	c.callbacksEnabled.Store(false)
-	subErr := c.deactivateAllSubscriptions("close")
+	subErr := c.deactivateAllSubscriptionsWithOp("close")
 	watchErr := c.stopAllWatches()
 	sessionErr := toPublicError(c.session.Close(ctx))
 
@@ -206,6 +221,27 @@ func (c *Client) Close(ctx context.Context) error {
 		}
 	}
 	return sessionErr
+}
+
+func (c *Client) startSession(ctx context.Context) error {
+	if c.startSessionFn != nil {
+		return c.startSessionFn(ctx)
+	}
+	return toPublicError(c.session.Start(ctx))
+}
+
+func (c *Client) activateAllSubscriptions(op string) error {
+	if c.activateAllSubscriptionsFn != nil {
+		return c.activateAllSubscriptionsFn(op)
+	}
+	return c.activateAllRegisteredSubscriptions(op)
+}
+
+func (c *Client) deactivateAllSubscriptionsWithOp(op string) error {
+	if c.deactivateAllSubscriptionsFn != nil {
+		return c.deactivateAllSubscriptionsFn(op)
+	}
+	return c.deactivateAllSubscriptions(op)
 }
 
 // Health returns the latest public health snapshot.

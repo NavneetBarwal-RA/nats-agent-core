@@ -133,7 +133,11 @@ func (c *Client) registerConfigureHandler(target string, handler ConfigureHandle
 		c.options.metrics.IncSubscribe(string(registry.KindConfigure), subject, "registered")
 	}
 
-	return c.activateAfterRegistration(snapshot.ID, "register_configure_handler")
+	if err := c.activateAfterRegistration(snapshot.ID, "register_configure_handler"); err != nil {
+		c.rollbackRegistration(snapshot.ID, "register_configure_handler_rollback")
+		return err
+	}
+	return nil
 }
 
 func (c *Client) registerActionHandler(target, action string, handler ActionHandler, opts ...SubscriptionOption) error {
@@ -167,7 +171,11 @@ func (c *Client) registerActionHandler(target, action string, handler ActionHand
 		c.options.metrics.IncSubscribe(string(registry.KindAction), subject, "registered")
 	}
 
-	return c.activateAfterRegistration(snapshot.ID, "register_action_handler")
+	if err := c.activateAfterRegistration(snapshot.ID, "register_action_handler"); err != nil {
+		c.rollbackRegistration(snapshot.ID, "register_action_handler_rollback")
+		return err
+	}
+	return nil
 }
 
 func (c *Client) registerResultHandler(target string, handler ResultHandler, opts ...SubscriptionOption) error {
@@ -200,7 +208,11 @@ func (c *Client) registerResultHandler(target string, handler ResultHandler, opt
 		c.options.metrics.IncSubscribe(string(registry.KindResult), subject, "registered")
 	}
 
-	return c.activateAfterRegistration(snapshot.ID, "register_result_handler")
+	if err := c.activateAfterRegistration(snapshot.ID, "register_result_handler"); err != nil {
+		c.rollbackRegistration(snapshot.ID, "register_result_handler_rollback")
+		return err
+	}
+	return nil
 }
 
 func (c *Client) registerStatusHandler(target string, handler StatusHandler, opts ...SubscriptionOption) error {
@@ -233,7 +245,11 @@ func (c *Client) registerStatusHandler(target string, handler StatusHandler, opt
 		c.options.metrics.IncSubscribe(string(registry.KindStatus), subject, "registered")
 	}
 
-	return c.activateAfterRegistration(snapshot.ID, "register_status_handler")
+	if err := c.activateAfterRegistration(snapshot.ID, "register_status_handler"); err != nil {
+		c.rollbackRegistration(snapshot.ID, "register_status_handler_rollback")
+		return err
+	}
+	return nil
 }
 
 func (c *Client) activateAfterRegistration(id, op string) error {
@@ -363,6 +379,28 @@ func (c *Client) deactivateAllSubscriptions(op string) error {
 	}
 	c.syncSubscriptionHealth()
 	return joined
+}
+
+func (c *Client) rollbackRegistration(id, op string) {
+	c.subMu.Lock()
+	handle, removed := c.subscriptions.Remove(id)
+	c.subMu.Unlock()
+
+	if !removed {
+		c.syncSubscriptionHealth()
+		return
+	}
+
+	if handle.Sub != nil {
+		if err := handle.Sub.Unsubscribe(); err != nil {
+			c.logWarn("failed to cleanup active subscription during registration rollback", "operation", op, "registration_id", handle.ID, "subject", handle.Subject, "error", err)
+			if c.options.errorSink != nil {
+				c.options.errorSink(err)
+			}
+		}
+	}
+
+	c.syncSubscriptionHealth()
 }
 
 func (c *Client) onSessionReconnected() {

@@ -261,3 +261,60 @@ func TestRestoreRecordsReturnsSavedIntent(t *testing.T) {
 		t.Fatalf("expected result kind %q, got %q", KindResult, got.Kind)
 	}
 }
+
+/*
+TC-REGISTRY-006
+Type: Positive
+Title: Remove deletes intent key and detaches active handle
+Summary:
+Verifies that removing a registration deletes duplicate-detection state and
+returns any detached active handle for caller-side cleanup.
+
+Validates:
+  - Remove returns detached active handle and true when entry exists
+  - removed registration no longer contributes to counters
+  - same registration can be added again after removal
+*/
+func TestRemoveDeletesIntentAndDetachesActiveHandle(t *testing.T) {
+	r := New()
+	snap, err := r.Add(AddSpec{
+		Kind:     KindResult,
+		Target:   "vyos",
+		Subject:  "result.vyos",
+		Callback: func(*nats.Msg) {},
+	})
+	if err != nil {
+		t.Fatalf("expected nil add error, got %v", err)
+	}
+
+	activeSub := &nats.Subscription{}
+	r.MarkActive(snap.ID, activeSub)
+
+	handle, ok := r.Remove(snap.ID)
+	if !ok {
+		t.Fatal("expected remove to succeed")
+	}
+	if handle.ID != snap.ID {
+		t.Fatalf("expected detached handle id %q, got %q", snap.ID, handle.ID)
+	}
+	if handle.Sub != activeSub {
+		t.Fatal("expected detached active subscription handle to match")
+	}
+
+	registered, active := r.Counts()
+	if registered != 0 {
+		t.Fatalf("expected registered count %d after remove, got %d", 0, registered)
+	}
+	if active != 0 {
+		t.Fatalf("expected active count %d after remove, got %d", 0, active)
+	}
+
+	if _, err := r.Add(AddSpec{
+		Kind:     KindResult,
+		Target:   "vyos",
+		Subject:  "result.vyos",
+		Callback: func(*nats.Msg) {},
+	}); err != nil {
+		t.Fatalf("expected re-add to succeed after remove, got %v", err)
+	}
+}

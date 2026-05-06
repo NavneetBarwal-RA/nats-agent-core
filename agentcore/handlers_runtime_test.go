@@ -193,6 +193,19 @@ func TestRegisterHandlerAfterCloseReturnsDisconnected(t *testing.T) {
 	if got.Op != "connection" {
 		t.Fatalf("expected error op %q, got %q", "connection", got.Op)
 	}
+
+	if got := client.Health().RegisteredSubscriptions; got != 0 {
+		t.Fatalf("expected RegisteredSubscriptions %d after failed immediate registration, got %d", 0, got)
+	}
+	if got := len(client.subscriptions.List()); got != 0 {
+		t.Fatalf("expected no stale registry intent after failed immediate registration, got %d entries", got)
+	}
+
+	retryErr := client.RegisterResultHandler("vyos", func(context.Context, ResultEnvelope) error { return nil })
+	got = requireErrorCode(t, retryErr, CodeDisconnected)
+	if got.Code == CodeRegistryConflict {
+		t.Fatalf("expected disconnected retry error, got stale conflict error: %v", got)
+	}
 }
 
 /*
@@ -396,5 +409,108 @@ func TestCallbackBindingLogsUserHandlerError(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected error log entry for result handler failure, got entries: %+v", logger.entries)
+	}
+}
+
+/*
+TC-CLIENT-HANDLERS-008
+Type: Negative
+Title: Start keeps callbacks disabled and cleans partial activations on failure
+Summary:
+Verifies that Start(...) does not enable callbacks until activation succeeds,
+and cleans up partially activated subscriptions when activation fails.
+
+Validates:
+  - Start returns activation error
+  - callbacksEnabled remains false on Start failure
+  - ActiveSubscriptions resets to zero after cleanup
+  - deferred registered intent remains stored for retry
+*/
+func TestStartActivationFailureDisablesCallbacksAndCleansPartials(t *testing.T) {
+	client, err := New(testConfig())
+	if err != nil {
+		t.Fatalf("New returned unexpected error: %v", err)
+	}
+
+	if err := client.RegisterConfigureHandler("vyos", func(context.Context, ConfigureNotification) error { return nil }); err != nil {
+		t.Fatalf("expected nil pre-start registration error, got %v", err)
+	}
+
+	client.startSessionFn = func(context.Context) error { return nil }
+	client.activateAllSubscriptionsFn = func(_ string) error {
+		records := client.subscriptions.ListActivations()
+		if len(records) != 1 {
+			t.Fatalf("expected one activation record, got %d", len(records))
+		}
+		client.subscriptions.MarkActive(records[0].ID, &nats.Subscription{})
+		client.syncSubscriptionHealth()
+		return &Error{
+			Code:      CodeSubscribeFailed,
+			Op:        "start",
+			Message:   "activation failed",
+			Retryable: true,
+		}
+	}
+
+	got := requireErrorCode(t, client.Start(context.Background()), CodeSubscribeFailed)
+	if got.Op != "start" {
+		t.Fatalf("expected error op %q, got %q", "start", got.Op)
+	}
+	if client.callbacksEnabled.Load() {
+		t.Fatal("expected callbacksEnabled to remain false on failed start")
+	}
+	if got := client.Health().RegisteredSubscriptions; got != 1 {
+		t.Fatalf("expected RegisteredSubscriptions %d to remain deferred intent, got %d", 1, got)
+	}
+	if got := client.Health().ActiveSubscriptions; got != 0 {
+		t.Fatalf("expected ActiveSubscriptions %d after cleanup, got %d", 0, got)
+	}
+}
+
+/*
+TC-CLIENT-HANDLERS-009
+Type: Positive
+Title: Start enables callbacks only after successful activation
+Summary:
+Verifies that Start(...) enables callback dispatch only after subscription
+activation succeeds and active subscription counters reflect success.
+
+Validates:
+  - Start succeeds when session start and activation succeed
+  - callbacksEnabled becomes true only after activation pass
+  - ActiveSubscriptions reflects activated registrations
+*/
+func TestStartEnablesCallbacksAfterSuccessfulActivation(t *testing.T) {
+	client, err := New(testConfig())
+	if err != nil {
+		t.Fatalf("New returned unexpected error: %v", err)
+	}
+
+	if err := client.RegisterResultHandler("vyos", func(context.Context, ResultEnvelope) error { return nil }); err != nil {
+		t.Fatalf("expected nil pre-start registration error, got %v", err)
+	}
+
+	client.startSessionFn = func(context.Context) error { return nil }
+	client.activateAllSubscriptionsFn = func(_ string) error {
+		records := client.subscriptions.ListActivations()
+		if len(records) != 1 {
+			t.Fatalf("expected one activation record, got %d", len(records))
+		}
+		client.subscriptions.MarkActive(records[0].ID, &nats.Subscription{})
+		client.syncSubscriptionHealth()
+		return nil
+	}
+
+	if err := client.Start(context.Background()); err != nil {
+		t.Fatalf("expected successful start, got %v", err)
+	}
+	if !client.callbacksEnabled.Load() {
+		t.Fatal("expected callbacksEnabled to be true after successful start")
+	}
+	if got := client.Health().RegisteredSubscriptions; got != 1 {
+		t.Fatalf("expected RegisteredSubscriptions %d, got %d", 1, got)
+	}
+	if got := client.Health().ActiveSubscriptions; got != 1 {
+		t.Fatalf("expected ActiveSubscriptions %d after activation, got %d", 1, got)
 	}
 }

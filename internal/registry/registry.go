@@ -146,6 +146,28 @@ func (r *Registry) ClearActiveHandles() []ActiveHandle {
 	return out
 }
 
+// Remove deletes a registration entry and detaches any active handle.
+func (r *Registry) Remove(id string) (ActiveHandle, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	e, ok := r.entries[id]
+	if !ok {
+		return ActiveHandle{}, false
+	}
+
+	handle := ActiveHandle{
+		ID:      e.ID,
+		Subject: e.Subject,
+		Sub:     e.ActiveSub,
+	}
+
+	delete(r.entries, id)
+	delete(r.byKey, e.Key)
+
+	return handle, true
+}
+
 // List returns read-only snapshots for diagnostics.
 func (r *Registry) List() []Snapshot {
 	r.mu.RLock()

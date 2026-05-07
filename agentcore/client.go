@@ -98,6 +98,8 @@ type Client struct {
 	subMu         sync.Mutex
 	subscriptions *registry.Registry
 	subjects      *subjects.Builder
+	handlerCtx    context.Context
+	handlerCancel context.CancelFunc
 
 	nextWatchID uint64
 	watches     map[uint64]StopFunc
@@ -171,6 +173,7 @@ func New(cfg Config, opts ...Option) (*Client, error) {
 	}
 	client.syncSubscriptionHealth()
 	runtime.SetReconnectHandler(client.onSessionReconnected)
+	runtime.SetClosedHandler(client.onSessionClosed)
 
 	return client, nil
 }
@@ -190,6 +193,7 @@ func (c *Client) Start(ctx context.Context) error {
 
 	if err := c.activateAllSubscriptions("start"); err != nil {
 		c.callbacksEnabled.Store(false)
+		c.cancelHandlerContext()
 		if cleanupErr := c.deactivateAllSubscriptionsWithOp("start_activation_cleanup"); cleanupErr != nil {
 			c.logWarn("failed to cleanup subscriptions after start activation failure", "error", cleanupErr)
 			if c.options.errorSink != nil {
@@ -199,6 +203,7 @@ func (c *Client) Start(ctx context.Context) error {
 		return err
 	}
 
+	c.setHandlerContext()
 	c.callbacksEnabled.Store(true)
 	return nil
 }
@@ -206,6 +211,7 @@ func (c *Client) Start(ctx context.Context) error {
 // Close ends the client lifecycle with watch cleanup and connection drain.
 func (c *Client) Close(ctx context.Context) error {
 	c.callbacksEnabled.Store(false)
+	c.cancelHandlerContext()
 	subErr := c.deactivateAllSubscriptionsWithOp("close")
 	watchErr := c.stopAllWatches()
 	sessionErr := toPublicError(c.session.Close(ctx))
@@ -254,6 +260,40 @@ func (c *Client) deactivateAllSubscriptionsWithOp(op string) error {
 		return c.deactivateAllSubscriptionsFn(op)
 	}
 	return c.deactivateAllSubscriptions(op)
+}
+
+func (c *Client) setHandlerContext() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.handlerCancel != nil {
+		c.handlerCancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	c.handlerCtx = ctx
+	c.handlerCancel = cancel
+}
+
+func (c *Client) cancelHandlerContext() {
+	c.mu.Lock()
+	cancel := c.handlerCancel
+	c.handlerCtx = nil
+	c.handlerCancel = nil
+	c.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (c *Client) handlerContext() context.Context {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if c.handlerCtx != nil {
+		return c.handlerCtx
+	}
+	return context.Background()
 }
 
 // Health returns the latest public health snapshot.

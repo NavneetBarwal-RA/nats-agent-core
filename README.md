@@ -67,8 +67,10 @@ Current code includes:
   - `WithQueueGroup(...)`
 - deferred registration support before `Start(ctx)`
 - reconnect-safe subscription restoration from in-memory registry intent
+- session-closed subscription cleanup that clears active handles while preserving registration intent
 - receive-side callback decode/validate/dispatch for configure/action/result/status
 - receive-side result correlation via preserved `rpc_id` in `ResultEnvelope`
+- lifecycle-context handler dispatch with cancellation on close/session shutdown
 
 Still deferred to later phases:
 - submit/publish wrappers for configure, action, result, and status
@@ -211,8 +213,9 @@ This repository currently targets Go 1.25.x.
 
 ## Testing
 
-This repository includes real-server integration tests for the currently
-implemented Phase 4 runtime/session/KV/recovery behavior.
+This repository includes real-server integration tests for currently
+implemented runtime/session/KV/recovery behavior, including Phase 5
+subscribe/reconnect flows.
 
 For local integration runs, `nats-server` must be installed and available in
 `PATH`.

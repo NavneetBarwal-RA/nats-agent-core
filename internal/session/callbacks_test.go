@@ -3,6 +3,7 @@ package session
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/nats-io/nats.go"
 )
@@ -98,6 +99,35 @@ func TestOnClosedTransitionsHealthToClosed(t *testing.T) {
 
 /*
 TC-SESSION-CALLBACKS-004
+Type: Positive
+Title: onClosed invokes registered closed hook outside lock
+Summary:
+Verifies that closed callback invokes the registered OnClosed hook and does so
+without holding the manager lock.
+
+Validates:
+  - OnClosed hook is called once
+  - hook can safely call lock-taking manager methods
+*/
+func TestOnClosedInvokesRegisteredHookOutsideLock(t *testing.T) {
+	m := &Manager{}
+	done := make(chan struct{}, 1)
+	m.hooks.OnClosed = func() {
+		m.SetReconnectHandler(nil)
+		done <- struct{}{}
+	}
+
+	go m.onClosed(nil)
+
+	select {
+	case <-done:
+	case <-time.After(1 * time.Second):
+		t.Fatal("timed out waiting for OnClosed hook invocation")
+	}
+}
+
+/*
+TC-SESSION-CALLBACKS-005
 Type: Positive
 Title: isBucketNotFound recognizes typed and message-based not-found errors
 Summary:

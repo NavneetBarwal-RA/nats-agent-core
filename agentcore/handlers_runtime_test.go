@@ -465,6 +465,12 @@ func TestStartActivationFailureDisablesCallbacksAndCleansPartials(t *testing.T) 
 	if got := client.Health().ActiveSubscriptions; got != 0 {
 		t.Fatalf("expected ActiveSubscriptions %d after cleanup, got %d", 0, got)
 	}
+	client.mu.RLock()
+	handlerCtx := client.handlerCtx
+	client.mu.RUnlock()
+	if handlerCtx != nil {
+		t.Fatal("expected handler context to remain nil on failed start")
+	}
 }
 
 /*
@@ -512,6 +518,17 @@ func TestStartEnablesCallbacksAfterSuccessfulActivation(t *testing.T) {
 	}
 	if got := client.Health().ActiveSubscriptions; got != 1 {
 		t.Fatalf("expected ActiveSubscriptions %d after activation, got %d", 1, got)
+	}
+	client.mu.RLock()
+	handlerCtx := client.handlerCtx
+	client.mu.RUnlock()
+	if handlerCtx == nil {
+		t.Fatal("expected handler context to be created after successful start")
+	}
+	select {
+	case <-handlerCtx.Done():
+		t.Fatal("expected handler context to remain active after successful start")
+	default:
 	}
 }
 
@@ -598,5 +615,228 @@ func TestNewRejectsInvalidConfiguredSubjectPatterns(t *testing.T) {
 	}
 	if !strings.Contains(got.Message, "action_pattern placeholder count is invalid") {
 		t.Fatalf("expected error message to mention invalid action pattern placeholders, got %q", got.Message)
+	}
+}
+
+/*
+TC-CLIENT-HANDLERS-012
+Type: Positive
+Title: Handler dispatch uses lifecycle context and close cancels it
+Summary:
+Verifies that dispatched handlers receive the client lifecycle context and that
+Close cancels that context for already-running handler work.
+
+Validates:
+  - callback dispatch receives non-canceled lifecycle context after Start
+  - Close cancels the same lifecycle context
+*/
+func TestHandlerDispatchUsesLifecycleContextAndCloseCancelsIt(t *testing.T) {
+	client, err := New(testConfig())
+	if err != nil {
+		t.Fatalf("New returned unexpected error: %v", err)
+	}
+
+	client.startSessionFn = func(context.Context) error { return nil }
+	client.activateAllSubscriptionsFn = func(_ string) error { return nil }
+
+	if err := client.Start(context.Background()); err != nil {
+		t.Fatalf("expected successful start, got %v", err)
+	}
+
+	handlerStarted := make(chan context.Context, 1)
+	handlerDone := make(chan struct{}, 1)
+	go func() {
+		_ = client.callResultHandler(func(ctx context.Context, _ ResultEnvelope) error {
+			handlerStarted <- ctx
+			<-ctx.Done()
+			handlerDone <- struct{}{}
+			return nil
+		}, ResultEnvelope{Version: "1.0", RPCID: "rpc-1", Target: "vyos", Result: "ok", Timestamp: time.Now().UTC()})
+	}()
+
+	var handlerCtx context.Context
+	select {
+	case handlerCtx = <-handlerStarted:
+	case <-time.After(1 * time.Second):
+		t.Fatal("timed out waiting for handler start")
+	}
+
+	select {
+	case <-handlerCtx.Done():
+		t.Fatal("expected handler context to be active before close")
+	default:
+	}
+
+	if err := client.Close(context.Background()); err != nil {
+		t.Fatalf("expected nil close error, got %v", err)
+	}
+
+	select {
+	case <-handlerDone:
+	case <-time.After(1 * time.Second):
+		t.Fatal("timed out waiting for handler context cancelation on close")
+	}
+}
+
+/*
+TC-CLIENT-HANDLERS-013
+Type: Positive
+Title: Session closed cleanup clears active handles and preserves intent
+Summary:
+Verifies unexpected session-closed cleanup disables callbacks, cancels handler
+context, clears active handle state, and preserves deferred registration intent.
+
+Validates:
+  - callbacksEnabled becomes false on session-closed cleanup
+  - handler lifecycle context is canceled
+  - ActiveSubscriptions is zeroed while RegisteredSubscriptions is preserved
+  - records remain registered and inactive for future reactivation
+*/
+func TestOnSessionClosedClearsActiveStateAndPreservesIntent(t *testing.T) {
+	client, err := New(testConfig())
+	if err != nil {
+		t.Fatalf("New returned unexpected error: %v", err)
+	}
+
+	if err := client.RegisterResultHandler("vyos", func(context.Context, ResultEnvelope) error { return nil }); err != nil {
+		t.Fatalf("expected nil registration error, got %v", err)
+	}
+
+	records := client.subscriptions.ListActivations()
+	if len(records) != 1 {
+		t.Fatalf("expected one activation record, got %d", len(records))
+	}
+	client.subscriptions.MarkActive(records[0].ID, &nats.Subscription{})
+	client.syncSubscriptionHealth()
+
+	client.setHandlerContext()
+	handlerCtx := client.handlerContext()
+	client.callbacksEnabled.Store(true)
+
+	client.onSessionClosed()
+
+	if client.callbacksEnabled.Load() {
+		t.Fatal("expected callbacksEnabled false after session closed cleanup")
+	}
+	select {
+	case <-handlerCtx.Done():
+	default:
+		t.Fatal("expected handler context to be canceled on session closed cleanup")
+	}
+	if got := client.Health().RegisteredSubscriptions; got != 1 {
+		t.Fatalf("expected RegisteredSubscriptions %d, got %d", 1, got)
+	}
+	if got := client.Health().ActiveSubscriptions; got != 0 {
+		t.Fatalf("expected ActiveSubscriptions %d after session closed cleanup, got %d", 0, got)
+	}
+	activation, ok := client.subscriptions.GetActivationRecord(records[0].ID)
+	if !ok {
+		t.Fatal("expected registration intent to remain after session closed cleanup")
+	}
+	if activation.Active {
+		t.Fatal("expected activation record to be marked inactive after cleanup")
+	}
+}
+
+/*
+TC-CLIENT-HANDLERS-015
+Type: Positive
+Title: Start can reactivate intents after session-closed cleanup
+Summary:
+Verifies that after unexpected session-closed cleanup, a later Start can
+reactivate saved subscription intent without re-registration.
+
+Validates:
+  - post-close cleanup leaves record inactive
+  - later Start activation pass can mark it active again
+*/
+func TestStartReactivatesIntentAfterSessionClosedCleanup(t *testing.T) {
+	client, err := New(testConfig())
+	if err != nil {
+		t.Fatalf("New returned unexpected error: %v", err)
+	}
+
+	if err := client.RegisterResultHandler("vyos", func(context.Context, ResultEnvelope) error { return nil }); err != nil {
+		t.Fatalf("expected nil registration error, got %v", err)
+	}
+
+	records := client.subscriptions.ListActivations()
+	if len(records) != 1 {
+		t.Fatalf("expected one activation record, got %d", len(records))
+	}
+	client.subscriptions.MarkActive(records[0].ID, &nats.Subscription{})
+	client.syncSubscriptionHealth()
+
+	client.onSessionClosed()
+
+	client.startSessionFn = func(context.Context) error { return nil }
+	client.activateAllSubscriptionsFn = func(_ string) error {
+		current := client.subscriptions.ListActivations()
+		if len(current) != 1 {
+			t.Fatalf("expected one activation record, got %d", len(current))
+		}
+		if current[0].Active {
+			t.Fatal("expected cleanup to clear stale active state before start reactivation")
+		}
+		client.subscriptions.MarkActive(current[0].ID, &nats.Subscription{})
+		client.syncSubscriptionHealth()
+		return nil
+	}
+
+	if err := client.Start(context.Background()); err != nil {
+		t.Fatalf("expected successful start, got %v", err)
+	}
+	if got := client.Health().RegisteredSubscriptions; got != 1 {
+		t.Fatalf("expected RegisteredSubscriptions %d, got %d", 1, got)
+	}
+	if got := client.Health().ActiveSubscriptions; got != 1 {
+		t.Fatalf("expected ActiveSubscriptions %d after reactivation, got %d", 1, got)
+	}
+}
+
+/*
+TC-CLIENT-HANDLERS-014
+Type: Positive
+Title: Nil callback messages are dropped safely for all handler kinds
+Summary:
+Verifies callback binders guard against nil *nats.Msg inputs and drop them
+without panicking or invoking user handlers.
+
+Validates:
+  - nil configure/action/result/status messages do not panic
+  - nil configure/action/result/status messages do not invoke handlers
+*/
+func TestCallbackBindingDropsNilMessagesWithoutPanic(t *testing.T) {
+	client, err := New(testConfig())
+	if err != nil {
+		t.Fatalf("New returned unexpected error: %v", err)
+	}
+	client.callbacksEnabled.Store(true)
+
+	calls := 0
+	configureCB := client.bindConfigureCallback(func(context.Context, ConfigureNotification) error {
+		calls++
+		return nil
+	})
+	actionCB := client.bindActionCallback(func(context.Context, ActionCommand) error {
+		calls++
+		return nil
+	})
+	resultCB := client.bindResultCallback(func(context.Context, ResultEnvelope) error {
+		calls++
+		return nil
+	})
+	statusCB := client.bindStatusCallback(func(context.Context, StatusEnvelope) error {
+		calls++
+		return nil
+	})
+
+	configureCB(nil)
+	actionCB(nil)
+	resultCB(nil)
+	statusCB(nil)
+
+	if calls != 0 {
+		t.Fatalf("expected no handler invocations for nil messages, got %d calls", calls)
 	}
 }

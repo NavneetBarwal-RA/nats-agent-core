@@ -20,8 +20,12 @@ import (
 type testNATSServer struct {
 	URL string
 
-	cmd  *exec.Cmd
-	logs *bytes.Buffer
+	bin      string
+	host     string
+	port     int
+	storeDir string
+	cmd      *exec.Cmd
+	logs     *bytes.Buffer
 }
 
 func startTestNATSServer(t *testing.T) *testNATSServer {
@@ -50,9 +54,13 @@ func startTestNATSServer(t *testing.T) *testNATSServer {
 	}
 
 	srv := &testNATSServer{
-		URL:  fmt.Sprintf("nats://127.0.0.1:%d", port),
-		cmd:  cmd,
-		logs: logBuf,
+		URL:      fmt.Sprintf("nats://127.0.0.1:%d", port),
+		bin:      bin,
+		host:     "127.0.0.1",
+		port:     port,
+		storeDir: storeDir,
+		cmd:      cmd,
+		logs:     logBuf,
 	}
 
 	t.Cleanup(func() {
@@ -64,6 +72,30 @@ func startTestNATSServer(t *testing.T) *testNATSServer {
 
 	waitForNATSServerReady(t, srv.URL, srv.logs.String)
 	return srv
+}
+
+func (srv *testNATSServer) restart(t *testing.T) {
+	t.Helper()
+
+	if srv.cmd != nil && srv.cmd.Process != nil {
+		_ = srv.cmd.Process.Kill()
+		_ = srv.cmd.Wait()
+	}
+
+	cmd := exec.Command(srv.bin,
+		"-js",
+		"-a", srv.host,
+		"-p", strconv.Itoa(srv.port),
+		"-sd", srv.storeDir,
+	)
+	cmd.Stdout = srv.logs
+	cmd.Stderr = srv.logs
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("failed to restart nats-server: %v", err)
+	}
+	srv.cmd = cmd
+	waitForNATSServerReady(t, srv.URL, srv.logs.String)
 }
 
 func waitForNATSServerReady(t *testing.T, serverURL string, logs func() string) {

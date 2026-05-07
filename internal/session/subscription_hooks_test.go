@@ -63,3 +63,36 @@ func TestSetReconnectHandlerStoresCallback(t *testing.T) {
 		t.Fatalf("expected reconnect callback calls %d, got %d", 1, calls)
 	}
 }
+
+/*
+TC-SESSION-HOOKS-003
+Type: Positive
+Title: SetClosedHandler stores closed callback hook
+Summary:
+Verifies that closed callback setter updates manager hook storage so client
+cleanup wiring can run when the session closes unexpectedly.
+
+Validates:
+  - closed hook setter stores the callback
+  - stored callback can be invoked safely
+*/
+func TestSetClosedHandlerStoresCallback(t *testing.T) {
+	m, err := NewManager(testSessionConfig(), Hooks{})
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+
+	calls := 0
+	m.SetClosedHandler(func() {
+		calls++
+	})
+
+	if m.hooks.OnClosed == nil {
+		t.Fatal("expected closed hook to be set")
+	}
+
+	m.hooks.OnClosed()
+	if calls != 1 {
+		t.Fatalf("expected closed callback calls %d, got %d", 1, calls)
+	}
+}

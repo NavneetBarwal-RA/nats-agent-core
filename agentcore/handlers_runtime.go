@@ -1,7 +1,6 @@
 package agentcore
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -337,6 +336,18 @@ func (c *Client) onSessionReconnected() {
 	c.logInfo("subscription restore completed")
 }
 
+func (c *Client) onSessionClosed() {
+	c.callbacksEnabled.Store(false)
+	c.cancelHandlerContext()
+
+	if err := c.deactivateAllSubscriptions("session_closed"); err != nil {
+		c.logWarn("failed to clear active subscriptions after session closed", "error", err)
+		if c.options.errorSink != nil {
+			c.options.errorSink(err)
+		}
+	}
+}
+
 func (c *Client) syncSubscriptionHealth() {
 	if c.subscriptions == nil || c.session == nil {
 		return
@@ -400,6 +411,13 @@ func (c *Client) bindConfigureCallback(handler ConfigureHandler) nats.MsgHandler
 		if !c.callbacksEnabled.Load() {
 			return
 		}
+		if msg == nil {
+			c.logWarn("dropping nil configure message")
+			if c.options.metrics != nil {
+				c.options.metrics.IncSubscribe(string(registry.KindConfigure), "", "decode_failed")
+			}
+			return
+		}
 		started := time.Now()
 		payload, err := decodeConfigureNotification("decode_configure_notification", msg.Data)
 		if err != nil {
@@ -425,6 +443,13 @@ func (c *Client) bindConfigureCallback(handler ConfigureHandler) nats.MsgHandler
 func (c *Client) bindActionCallback(handler ActionHandler) nats.MsgHandler {
 	return func(msg *nats.Msg) {
 		if !c.callbacksEnabled.Load() {
+			return
+		}
+		if msg == nil {
+			c.logWarn("dropping nil action message")
+			if c.options.metrics != nil {
+				c.options.metrics.IncSubscribe(string(registry.KindAction), "", "decode_failed")
+			}
 			return
 		}
 		started := time.Now()
@@ -454,6 +479,13 @@ func (c *Client) bindResultCallback(handler ResultHandler) nats.MsgHandler {
 		if !c.callbacksEnabled.Load() {
 			return
 		}
+		if msg == nil {
+			c.logWarn("dropping nil result message")
+			if c.options.metrics != nil {
+				c.options.metrics.IncSubscribe(string(registry.KindResult), "", "decode_failed")
+			}
+			return
+		}
 		started := time.Now()
 		payload, err := decodeResultEnvelope("decode_result_envelope", msg.Data)
 		if err != nil {
@@ -479,6 +511,13 @@ func (c *Client) bindResultCallback(handler ResultHandler) nats.MsgHandler {
 func (c *Client) bindStatusCallback(handler StatusHandler) nats.MsgHandler {
 	return func(msg *nats.Msg) {
 		if !c.callbacksEnabled.Load() {
+			return
+		}
+		if msg == nil {
+			c.logWarn("dropping nil status message")
+			if c.options.metrics != nil {
+				c.options.metrics.IncSubscribe(string(registry.KindStatus), "", "decode_failed")
+			}
 			return
 		}
 		started := time.Now()
@@ -515,7 +554,7 @@ func (c *Client) callConfigureHandler(handler ConfigureHandler, msg ConfigureNot
 			}
 		}
 	}()
-	return handler(context.Background(), msg)
+	return handler(c.handlerContext(), msg)
 }
 
 func (c *Client) callActionHandler(handler ActionHandler, msg ActionCommand) (err error) {
@@ -530,7 +569,7 @@ func (c *Client) callActionHandler(handler ActionHandler, msg ActionCommand) (er
 			}
 		}
 	}()
-	return handler(context.Background(), msg)
+	return handler(c.handlerContext(), msg)
 }
 
 func (c *Client) callResultHandler(handler ResultHandler, msg ResultEnvelope) (err error) {
@@ -545,7 +584,7 @@ func (c *Client) callResultHandler(handler ResultHandler, msg ResultEnvelope) (e
 			}
 		}
 	}()
-	return handler(context.Background(), msg)
+	return handler(c.handlerContext(), msg)
 }
 
 func (c *Client) callStatusHandler(handler StatusHandler, msg StatusEnvelope) (err error) {
@@ -560,7 +599,7 @@ func (c *Client) callStatusHandler(handler StatusHandler, msg StatusEnvelope) (e
 			}
 		}
 	}()
-	return handler(context.Background(), msg)
+	return handler(c.handlerContext(), msg)
 }
 
 func decodeConfigureNotification(op string, data []byte) (ConfigureNotification, error) {

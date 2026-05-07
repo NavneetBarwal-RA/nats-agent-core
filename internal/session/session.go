@@ -126,6 +126,13 @@ func (m *Manager) SetReconnectHandler(fn func()) {
 	m.hooks.OnReconnected = fn
 }
 
+// SetClosedHandler updates the closed callback hook.
+func (m *Manager) SetClosedHandler(fn func()) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.hooks.OnClosed = fn
+}
+
 // Start initializes the runtime connection, JetStream handle, and KV bucket.
 func (m *Manager) Start(ctx context.Context) error {
 	if ctx == nil {

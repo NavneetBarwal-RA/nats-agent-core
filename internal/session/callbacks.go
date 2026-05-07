@@ -32,9 +32,13 @@ func (m *Manager) onReconnect(nc *nats.Conn) {
 
 func (m *Manager) onClosed(_ *nats.Conn) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	m.setClosedLocked(nil)
+	onClosed := m.hooks.OnClosed
+	m.mu.Unlock()
+
+	if onClosed != nil {
+		onClosed()
+	}
 }
 
 func (m *Manager) onAsyncError(err error) {

@@ -533,6 +533,99 @@ func TestStartEnablesCallbacksAfterSuccessfulActivation(t *testing.T) {
 }
 
 /*
+TC-CLIENT-HANDLERS-009B
+Type: Positive
+Title: Repeated Start preserves active handler lifecycle context
+Summary:
+Verifies that calling Start(...) repeatedly on an already-running client does
+not cancel and replace an active handler lifecycle context.
+
+Validates:
+  - first and second Start share the same active lifecycle context
+  - repeated Start does not cancel existing handler context
+  - callbacksEnabled remains true
+*/
+func TestRepeatedStartDoesNotCancelActiveHandlerContext(t *testing.T) {
+	client, err := New(testConfig())
+	if err != nil {
+		t.Fatalf("New returned unexpected error: %v", err)
+	}
+
+	client.startSessionFn = func(context.Context) error { return nil }
+	client.activateAllSubscriptionsFn = func(_ string) error { return nil }
+
+	if err := client.Start(context.Background()); err != nil {
+		t.Fatalf("first Start returned unexpected error: %v", err)
+	}
+	firstCtx := client.handlerContext()
+
+	if err := client.Start(context.Background()); err != nil {
+		t.Fatalf("second Start returned unexpected error: %v", err)
+	}
+	secondCtx := client.handlerContext()
+
+	if firstCtx != secondCtx {
+		t.Fatal("expected repeated Start to preserve active handler context")
+	}
+	select {
+	case <-firstCtx.Done():
+		t.Fatal("expected repeated Start not to cancel active handler context")
+	default:
+	}
+	if !client.callbacksEnabled.Load() {
+		t.Fatal("expected callbacksEnabled to remain true after repeated Start")
+	}
+}
+
+/*
+TC-CLIENT-HANDLERS-009C
+Type: Positive
+Title: Start recreates handler lifecycle context after cancellation
+Summary:
+Verifies that Start(...) creates a new lifecycle context when no active
+handler context exists because the previous one was canceled.
+
+Validates:
+  - canceled handler context is replaced on next successful Start
+  - replacement context is active and distinct from the canceled one
+*/
+func TestStartRecreatesHandlerContextAfterCancellation(t *testing.T) {
+	client, err := New(testConfig())
+	if err != nil {
+		t.Fatalf("New returned unexpected error: %v", err)
+	}
+
+	client.startSessionFn = func(context.Context) error { return nil }
+	client.activateAllSubscriptionsFn = func(_ string) error { return nil }
+
+	if err := client.Start(context.Background()); err != nil {
+		t.Fatalf("first Start returned unexpected error: %v", err)
+	}
+	firstCtx := client.handlerContext()
+
+	client.cancelHandlerContext()
+	select {
+	case <-firstCtx.Done():
+	default:
+		t.Fatal("expected first handler context to be canceled")
+	}
+
+	if err := client.Start(context.Background()); err != nil {
+		t.Fatalf("second Start returned unexpected error: %v", err)
+	}
+	secondCtx := client.handlerContext()
+
+	if secondCtx == firstCtx {
+		t.Fatal("expected Start to replace canceled handler context")
+	}
+	select {
+	case <-secondCtx.Done():
+		t.Fatal("expected recreated handler context to be active")
+	default:
+	}
+}
+
+/*
 TC-CLIENT-HANDLERS-010
 Type: Positive
 Title: Handler registration uses configured custom subject patterns
@@ -709,7 +802,7 @@ func TestOnSessionClosedClearsActiveStateAndPreservesIntent(t *testing.T) {
 	client.subscriptions.MarkActive(records[0].ID, &nats.Subscription{})
 	client.syncSubscriptionHealth()
 
-	client.setHandlerContext()
+	client.ensureHandlerContext()
 	handlerCtx := client.handlerContext()
 	client.callbacksEnabled.Store(true)
 

@@ -203,7 +203,7 @@ func (c *Client) Start(ctx context.Context) error {
 		return err
 	}
 
-	c.setHandlerContext()
+	c.ensureHandlerContext()
 	c.callbacksEnabled.Store(true)
 	return nil
 }
@@ -262,12 +262,18 @@ func (c *Client) deactivateAllSubscriptionsWithOp(op string) error {
 	return c.deactivateAllSubscriptions(op)
 }
 
-func (c *Client) setHandlerContext() {
+func (c *Client) ensureHandlerContext() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.handlerCancel != nil {
-		c.handlerCancel()
+	if c.handlerCtx != nil {
+		select {
+		case <-c.handlerCtx.Done():
+			// Existing lifecycle context is canceled and must be replaced.
+		default:
+			// Existing lifecycle context is still active; keep it.
+			return
+		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	c.handlerCtx = ctx

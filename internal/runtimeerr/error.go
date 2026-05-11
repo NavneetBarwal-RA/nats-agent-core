@@ -13,6 +13,7 @@ const (
 	CodeKVStoreFailed    Code = "kv_store_failed"
 	CodeKVReadFailed     Code = "kv_read_failed"
 	CodeConfigNotFound   Code = "config_not_found"
+	CodePublishFailed    Code = "publish_failed"
 	CodeDecodeFailed     Code = "decode_failed"
 	CodeEncodeFailed     Code = "encode_failed"
 	CodeSubscribeFailed  Code = "subscribe_failed"

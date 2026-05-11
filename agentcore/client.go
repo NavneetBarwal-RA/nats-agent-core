@@ -13,6 +13,7 @@ import (
 	"github.com/routerarchitects/nats-agent-core/internal/runtimeerr"
 	"github.com/routerarchitects/nats-agent-core/internal/session"
 	"github.com/routerarchitects/nats-agent-core/internal/subjects"
+	"github.com/routerarchitects/nats-agent-core/internal/transport"
 )
 
 // ConfigureHandler handles configure notifications for a target.
@@ -98,6 +99,7 @@ type Client struct {
 	subMu         sync.Mutex
 	subscriptions *registry.Registry
 	subjects      *subjects.Builder
+	publisher     *transport.Publisher
 	handlerCtx    context.Context
 	handlerCancel context.CancelFunc
 
@@ -161,6 +163,16 @@ func New(cfg Config, opts ...Option) (*Client, error) {
 	if err != nil {
 		return nil, toPublicError(err)
 	}
+	publisher, err := transport.NewPublisher(
+		runtime,
+		func() time.Duration {
+			return runtime.EffectiveConfig().Timeouts.PublishTimeout
+		},
+		options.metrics,
+	)
+	if err != nil {
+		return nil, toPublicError(err)
+	}
 
 	client := &Client{
 		cfg:           cfg,
@@ -169,6 +181,7 @@ func New(cfg Config, opts ...Option) (*Client, error) {
 		kv:            store,
 		subscriptions: registry.New(),
 		subjects:      subjectBuilder,
+		publisher:     publisher,
 		watches:       make(map[uint64]StopFunc),
 	}
 	client.syncSubscriptionHealth()
@@ -375,8 +388,8 @@ func (c *Client) SubmitConfigure(ctx context.Context, cmd ConfigureCommand) (*Su
 		}
 	}
 
-	if err := c.publishPayload(ctx, "submit_configure_publish_notification", string(registry.KindConfigure), subject, payload); err != nil {
-		return nil, err
+	if err := c.publisher.Publish(ctx, "submit_configure_publish_notification", string(registry.KindConfigure), subject, payload); err != nil {
+		return nil, toPublicError(err)
 	}
 
 	return &SubmissionAck{
@@ -422,8 +435,8 @@ func (c *Client) SubmitAction(ctx context.Context, cmd ActionCommand) (*Submissi
 		}
 	}
 
-	if err := c.publishPayload(ctx, "submit_action_publish", string(registry.KindAction), subject, payload); err != nil {
-		return nil, err
+	if err := c.publisher.Publish(ctx, "submit_action_publish", string(registry.KindAction), subject, payload); err != nil {
+		return nil, toPublicError(err)
 	}
 
 	return &SubmissionAck{
@@ -466,7 +479,10 @@ func (c *Client) PublishResult(ctx context.Context, msg ResultEnvelope) error {
 		}
 	}
 
-	return c.publishPayload(ctx, op, string(registry.KindResult), subject, payload)
+	if err := c.publisher.Publish(ctx, op, string(registry.KindResult), subject, payload); err != nil {
+		return toPublicError(err)
+	}
+	return nil
 }
 
 // PublishStatus publishes a status envelope in later phases.
@@ -500,7 +516,10 @@ func (c *Client) PublishStatus(ctx context.Context, msg StatusEnvelope) error {
 		}
 	}
 
-	return c.publishPayload(ctx, op, string(registry.KindStatus), subject, payload)
+	if err := c.publisher.Publish(ctx, op, string(registry.KindStatus), subject, payload); err != nil {
+		return toPublicError(err)
+	}
+	return nil
 }
 
 // StoreDesiredConfig writes desired configuration to JetStream KV.
@@ -790,66 +809,4 @@ func validateOperationContext(op string, ctx context.Context) error {
 		}
 	}
 	return nil
-}
-
-func (c *Client) publishPayload(ctx context.Context, op, kind, subject string, payload []byte) error {
-	nc, err := c.session.Connection()
-	if err != nil {
-		return toPublicError(err)
-	}
-
-	started := time.Now()
-
-	if err := nc.Publish(subject, payload); err != nil {
-		if c.options.metrics != nil {
-			c.options.metrics.IncPublish(kind, subject, "failure")
-		}
-		return &Error{
-			Code:      CodePublishFailed,
-			Op:        op,
-			Subject:   subject,
-			Message:   "publish failed",
-			Retryable: true,
-			Err:       err,
-		}
-	}
-
-	flushCtx, cancel := c.publishContext(ctx)
-	defer cancel()
-
-	if err := nc.FlushWithContext(flushCtx); err != nil {
-		if c.options.metrics != nil {
-			c.options.metrics.IncPublish(kind, subject, "failure")
-		}
-		return &Error{
-			Code:      CodePublishFailed,
-			Op:        op,
-			Subject:   subject,
-			Message:   "flush failed",
-			Retryable: true,
-			Err:       err,
-		}
-	}
-
-	if c.options.metrics != nil {
-		c.options.metrics.IncPublish(kind, subject, "success")
-		c.options.metrics.ObservePublishLatency(kind, subject, time.Since(started))
-	}
-
-	return nil
-}
-
-func (c *Client) publishContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	if ctx == nil {
-		return context.WithCancel(context.Background())
-	}
-	if _, ok := ctx.Deadline(); ok {
-		return ctx, func() {}
-	}
-
-	timeout := c.session.EffectiveConfig().Timeouts.PublishTimeout
-	if timeout <= 0 {
-		return ctx, func() {}
-	}
-	return context.WithTimeout(ctx, timeout)
 }

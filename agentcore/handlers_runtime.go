@@ -402,6 +402,18 @@ func (c *Client) subscribeInternal(op, kind, subject, queueGroup string, callbac
 		}
 	}
 
+	if err := nc.FlushTimeout(c.session.EffectiveConfig().Timeouts.PublishTimeout); err != nil {
+		_ = sub.Unsubscribe()
+		return nil, &Error{
+			Code:      CodeSubscribeFailed,
+			Op:        op,
+			Subject:   subject,
+			Message:   "subscribe readiness flush failed",
+			Retryable: true,
+			Err:       err,
+		}
+	}
+
 	c.logDebug("subscription created", "kind", kind, "subject", subject, "queue_group", queueGroup)
 	return sub, nil
 }

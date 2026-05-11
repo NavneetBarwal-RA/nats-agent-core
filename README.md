@@ -193,6 +193,22 @@ The main public APIs currently usable by an owning agent are:
 
 ---
 
+## Handler execution model
+
+Registered configure/action/result/status handlers are executed inline from the
+NATS subscription callback path.
+
+Handlers should return quickly. Long-running or blocking work should be
+offloaded by the agent to a goroutine, worker pool, or internal job queue.
+This prevents later messages on the same subscription from being delayed and
+helps avoid backpressure in callback processing.
+
+The library owns subscription registration, callback binding, envelope decoding,
+and reconnect restore. Agents remain responsible for workload execution and
+handler concurrency policy.
+
+---
+
 ### Current startup limitation
 
 `RetryOnFailedConnect` is not supported by the current synchronous `Start(ctx)` behavior.

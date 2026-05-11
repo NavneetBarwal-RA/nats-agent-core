@@ -402,7 +402,7 @@ func (c *Client) subscribeInternal(op, kind, subject, queueGroup string, callbac
 		}
 	}
 
-	if err := nc.FlushTimeout(c.session.EffectiveConfig().Timeouts.PublishTimeout); err != nil {
+	if err := nc.FlushTimeout(c.session.EffectiveConfig().Timeouts.SubscribeTimeout); err != nil {
 		_ = sub.Unsubscribe()
 		return nil, &Error{
 			Code:      CodeSubscribeFailed,

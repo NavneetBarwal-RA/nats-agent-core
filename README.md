@@ -40,7 +40,13 @@ This repository currently includes:
 - Phase 2 contract, codec, and validation helpers
 - Phase 3 subject helpers and publish-path foundations
 - Phase 4 session, JetStream, KV, health, and recovery support
-- Phase 5 subscribe wrappers, handler runtime wiring, and reconnect-safe subscription restore
+- Phase 5 bidirectional public transport APIs (send + receive), handler runtime wiring, and reconnect-safe subscription restore
+
+Phase 6 remains scoped to:
+- clear error outcomes
+- logging hooks
+- metrics hooks
+- operational visibility
 
 Current code includes:
 - public config, model, error, logger, and metrics types
@@ -58,6 +64,11 @@ Current code includes:
   - `LoadDesiredConfig(...)`
   - `WatchDesiredConfig(...)`
   - `StartupReconcile(...)`
+- public send/publish APIs:
+  - `SubmitConfigure(...)`
+  - `SubmitAction(...)`
+  - `PublishResult(...)`
+  - `PublishStatus(...)`
 - public handler registration APIs:
   - `RegisterConfigureHandler(...)`
   - `RegisterActionHandler(...)`
@@ -66,15 +77,17 @@ Current code includes:
 - optional queue-group subscription option:
   - `WithQueueGroup(...)`
 - deferred registration support before `Start(ctx)`
+- configure store-then-notify flow via `SubmitConfigure(...)`
+- direct action publish flow via `SubmitAction(...)`
+- public result/status publish via `PublishResult(...)` and `PublishStatus(...)`
+- low-level NATS publish/flush/timeout behavior centralized in `internal/transport.Publisher`
+- subscribe readiness synchronized with NATS using a flush before marking subscriptions active
 - reconnect-safe subscription restoration from in-memory registry intent
 - session-closed subscription cleanup that clears active handles while preserving registration intent
 - receive-side callback decode/validate/dispatch for configure/action/result/status
 - receive-side result correlation via preserved `rpc_id` in `ResultEnvelope`
 - lifecycle-context handler dispatch with cancellation on close/session shutdown
-
-Still deferred to later phases:
-- submit/publish wrappers for configure, action, result, and status
-- integration examples / full quick-start flows
+- public sender-to-receiver integration coverage on real `nats-server`, including action/result round-trip and reconnect restore with public `PublishResult(...)`
 
 ---
 
@@ -93,13 +106,11 @@ The library currently helps agents:
 - restore handler subscriptions after reconnect without manual re-registration
 - receive typed configure/action/result/status messages through callback binding
 - correlate received results using preserved `rpc_id`
-
-## What is planned next
-
-Later phases are intended to add:
-- configure/action submit wrappers
-- result/status publish wrappers
-- integration examples / fuller quick-start flows
+- submit configure commands with store-then-notify semantics
+- submit action commands through direct publish
+- publish result envelopes
+- publish status envelopes
+- compose public sender and receiver APIs into agent-to-agent flows
 
 ---
 
@@ -120,15 +131,18 @@ The library is designed around the idea that agents use shared transport/state h
 
 ## Basic communication model
 
-The flows below describe the intended library communication model.
+The flows below describe the current library communication model.
 
 As of the current implementation:
-- session startup, JetStream/KV access, desired-config store/load/watch, startup reconciliation, and receive-side handler flows are implemented
-- configure/action submit wrappers and result/status publish wrappers are still planned for later phases
+- configure uses `SubmitConfigure(...)` (store desired config, then publish notification)
+- action uses `SubmitAction(...)` (direct action publish)
+- result/status use `PublishResult(...)` and `PublishStatus(...)`
+- receive handlers are available for configure/action/result/status
+- registered subscriptions are restored after reconnect
 
 ### Configure flow
 
-1. Agent receives a validated configure request
+1. Agent calls `SubmitConfigure(...)` with a validated configure command
 2. Library stores desired configuration in JetStream KV
 3. Library publishes a lightweight configure notification
 4. Target agent receives the notification
@@ -138,7 +152,7 @@ As of the current implementation:
 
 ### Action flow
 
-1. Agent receives a validated action request
+1. Agent calls `SubmitAction(...)` with a validated action command
 2. Library publishes the action command on the target action subject
 3. Target agent receives the action
 4. Target agent executes the local action
@@ -146,7 +160,7 @@ As of the current implementation:
 
 ### Result flow
 
-1. Target agent publishes result/status
+1. Target agent publishes result/status via `PublishResult(...)` or `PublishStatus(...)`
 2. Calling side receives the message through the library
 3. Correlation is performed using shared message fields
 
@@ -186,6 +200,10 @@ The main public APIs currently usable by an owning agent are:
 - `LoadDesiredConfig(...)`
 - `WatchDesiredConfig(...)`
 - `StartupReconcile(...)`
+- `SubmitConfigure(...)`
+- `SubmitAction(...)`
+- `PublishResult(...)`
+- `PublishStatus(...)`
 - `RegisterConfigureHandler(...)`
 - `RegisterActionHandler(...)`
 - `RegisterResultHandler(...)`
@@ -229,9 +247,11 @@ This repository currently targets Go 1.25.x.
 
 ## Testing
 
-This repository includes real-server integration tests for currently
-implemented runtime/session/KV/recovery behavior, including Phase 5
-subscribe/reconnect flows.
+This repository includes:
+- receive-side integration tests using raw NATS message injection
+- public sender-to-receiver integration tests using public APIs on both clients
+- public action/result round-trip integration coverage
+- reconnect-restore integration coverage with public `PublishResult(...)` after server restart
 
 For local integration runs, `nats-server` must be installed and available in
 `PATH`.

@@ -81,25 +81,6 @@ func testConfig() Config {
 	}
 }
 
-func requireNotImplementedError(t *testing.T, err error, wantOp string) {
-	t.Helper()
-
-	if err == nil {
-		t.Fatal("expected non-nil error")
-	}
-
-	var got *Error
-	if !errors.As(err, &got) {
-		t.Fatalf("expected *Error, got %T", err)
-	}
-	if got.Code != CodeNotImplemented {
-		t.Fatalf("expected error code %q, got %q", CodeNotImplemented, got.Code)
-	}
-	if got.Op != wantOp {
-		t.Fatalf("expected error op %q, got %q", wantOp, got.Op)
-	}
-}
-
 func requireErrorCode(t *testing.T, err error, wantCode Code) *Error {
 	t.Helper()
 
@@ -469,15 +450,15 @@ func TestCloseBeforeStartMovesHealthToClosed(t *testing.T) {
 /*
 TC-CLIENT-007
 Type: Negative
-Title: Runtime-backed APIs return disconnected before start while deferred APIs stay not implemented
+Title: Runtime-backed APIs return disconnected before start
 Summary:
 Verifies that runtime-backed desired-config APIs fail clearly with
-CodeDisconnected before Start, while deferred publish/submit APIs that are not
-yet implemented continue to return CodeNotImplemented.
+CodeDisconnected before Start. This includes send/publish APIs that require an
+active runtime connection.
 
 Validates:
   - runtime-backed desired-config APIs return CodeDisconnected when not started
-  - deferred submit/publish APIs still return CodeNotImplemented with expected operation names
+  - send/publish APIs return CodeDisconnected when not started
   - handler registration APIs succeed pre-start and store deferred registration state
 */
 func TestPhase4RuntimeAndDeferredMethodsReturnExpectedErrors(t *testing.T) {
@@ -585,14 +566,12 @@ func TestPhase4RuntimeAndDeferredMethodsReturnExpectedErrors(t *testing.T) {
 		})
 	}
 
-	deferredTests := []struct {
+	sendTests := []struct {
 		name string
-		op   string
 		call func(*Client) error
 	}{
 		{
 			name: "SubmitConfigure",
-			op:   "submit_configure",
 			call: func(c *Client) error {
 				ack, err := c.SubmitConfigure(context.Background(), cfgCmd)
 				if ack != nil {
@@ -603,7 +582,6 @@ func TestPhase4RuntimeAndDeferredMethodsReturnExpectedErrors(t *testing.T) {
 		},
 		{
 			name: "SubmitAction",
-			op:   "submit_action",
 			call: func(c *Client) error {
 				ack, err := c.SubmitAction(context.Background(), actionCmd)
 				if ack != nil {
@@ -614,24 +592,22 @@ func TestPhase4RuntimeAndDeferredMethodsReturnExpectedErrors(t *testing.T) {
 		},
 		{
 			name: "PublishResult",
-			op:   "publish_result",
 			call: func(c *Client) error {
 				return c.PublishResult(context.Background(), resultMsg)
 			},
 		},
 		{
 			name: "PublishStatus",
-			op:   "publish_status",
 			call: func(c *Client) error {
 				return c.PublishStatus(context.Background(), statusMsg)
 			},
 		},
 	}
 
-	for _, tc := range deferredTests {
+	for _, tc := range sendTests {
 		t.Run(tc.name, func(t *testing.T) {
 			err := tc.call(client)
-			requireNotImplementedError(t, err, tc.op)
+			requireErrorCode(t, err, CodeDisconnected)
 		})
 	}
 

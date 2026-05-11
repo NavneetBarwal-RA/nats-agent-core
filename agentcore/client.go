@@ -312,54 +312,195 @@ func (c *Client) Health() HealthSnapshot {
 
 // SubmitConfigure accepts a configure command for later-phase transport logic.
 func (c *Client) SubmitConfigure(ctx context.Context, cmd ConfigureCommand) (*SubmissionAck, error) {
-	_ = ctx
-	_ = cmd
+	const op = "submit_configure"
 
-	return nil, &Error{
-		Code:      CodeNotImplemented,
-		Op:        "submit_configure",
-		Message:   "SubmitConfigure is not implemented in bootstrap phase",
-		Retryable: false,
+	if err := validateOperationContext(op, ctx); err != nil {
+		return nil, err
 	}
+	if err := validateConfigureCommand(op, cmd); err != nil {
+		return nil, err
+	}
+	if _, err := c.session.Connection(); err != nil {
+		return nil, toPublicError(err)
+	}
+
+	stored, err := c.StoreDesiredConfig(ctx, DesiredConfigRecord{
+		Version:   cmd.Version,
+		RPCID:     cmd.RPCID,
+		Target:    cmd.Target,
+		UUID:      cmd.UUID,
+		Payload:   cmd.Payload,
+		Timestamp: cmd.Timestamp,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if stored == nil {
+		return nil, &Error{
+			Code:      CodeKVStoreFailed,
+			Op:        "submit_configure_store_desired",
+			Message:   "desired config store returned nil result",
+			Retryable: true,
+		}
+	}
+
+	subject, err := c.subjects.ConfigureSubject(cmd.Target)
+	if err != nil {
+		return nil, toPublicError(err)
+	}
+
+	notification := ConfigureNotification{
+		Version:     cmd.Version,
+		RPCID:       cmd.RPCID,
+		Target:      cmd.Target,
+		CommandType: "configure",
+		UUID:        cmd.UUID,
+		KVBucket:    stored.Bucket,
+		KVKey:       stored.Key,
+		Timestamp:   c.options.now().UTC(),
+	}
+	if err := validateConfigureNotification(op, notification); err != nil {
+		return nil, err
+	}
+
+	payload, err := json.Marshal(notification)
+	if err != nil {
+		return nil, &Error{
+			Code:      CodeEncodeFailed,
+			Op:        "submit_configure_encode_notification",
+			Subject:   subject,
+			Message:   "failed to encode configure notification",
+			Retryable: false,
+			Err:       err,
+		}
+	}
+
+	if err := c.publishPayload(ctx, "submit_configure_publish_notification", string(registry.KindConfigure), subject, payload); err != nil {
+		return nil, err
+	}
+
+	return &SubmissionAck{
+		Accepted:   true,
+		RPCID:      cmd.RPCID,
+		Target:     cmd.Target,
+		Subject:    subject,
+		AcceptedAt: notification.Timestamp,
+		KVBucket:   stored.Bucket,
+		KVKey:      stored.Key,
+		KVRevision: stored.Revision,
+	}, nil
 }
 
 // SubmitAction accepts an action command for later-phase transport logic.
 func (c *Client) SubmitAction(ctx context.Context, cmd ActionCommand) (*SubmissionAck, error) {
-	_ = ctx
-	_ = cmd
+	const op = "submit_action"
 
-	return nil, &Error{
-		Code:      CodeNotImplemented,
-		Op:        "submit_action",
-		Message:   "SubmitAction is not implemented in bootstrap phase",
-		Retryable: false,
+	if err := validateOperationContext(op, ctx); err != nil {
+		return nil, err
 	}
+	if err := validateActionCommand(op, cmd); err != nil {
+		return nil, err
+	}
+	if _, err := c.session.Connection(); err != nil {
+		return nil, toPublicError(err)
+	}
+
+	subject, err := c.subjects.ActionSubject(cmd.Target, cmd.Action)
+	if err != nil {
+		return nil, toPublicError(err)
+	}
+
+	payload, err := json.Marshal(cmd)
+	if err != nil {
+		return nil, &Error{
+			Code:      CodeEncodeFailed,
+			Op:        "submit_action_encode",
+			Subject:   subject,
+			Message:   "failed to encode action command",
+			Retryable: false,
+			Err:       err,
+		}
+	}
+
+	if err := c.publishPayload(ctx, "submit_action_publish", string(registry.KindAction), subject, payload); err != nil {
+		return nil, err
+	}
+
+	return &SubmissionAck{
+		Accepted:   true,
+		RPCID:      cmd.RPCID,
+		Target:     cmd.Target,
+		Subject:    subject,
+		AcceptedAt: c.options.now().UTC(),
+	}, nil
 }
 
 // PublishResult publishes a result envelope in later phases.
 func (c *Client) PublishResult(ctx context.Context, msg ResultEnvelope) error {
-	_ = ctx
-	_ = msg
+	const op = "publish_result"
 
-	return &Error{
-		Code:      CodeNotImplemented,
-		Op:        "publish_result",
-		Message:   "PublishResult is not implemented in bootstrap phase",
-		Retryable: false,
+	if err := validateOperationContext(op, ctx); err != nil {
+		return err
 	}
+	if err := validateResultEnvelope(op, msg); err != nil {
+		return err
+	}
+	if _, err := c.session.Connection(); err != nil {
+		return toPublicError(err)
+	}
+
+	subject, err := c.subjects.ResultSubject(msg.Target)
+	if err != nil {
+		return toPublicError(err)
+	}
+
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		return &Error{
+			Code:      CodeEncodeFailed,
+			Op:        "publish_result_encode",
+			Subject:   subject,
+			Message:   "failed to encode result envelope",
+			Retryable: false,
+			Err:       err,
+		}
+	}
+
+	return c.publishPayload(ctx, op, string(registry.KindResult), subject, payload)
 }
 
 // PublishStatus publishes a status envelope in later phases.
 func (c *Client) PublishStatus(ctx context.Context, msg StatusEnvelope) error {
-	_ = ctx
-	_ = msg
+	const op = "publish_status"
 
-	return &Error{
-		Code:      CodeNotImplemented,
-		Op:        "publish_status",
-		Message:   "PublishStatus is not implemented in bootstrap phase",
-		Retryable: false,
+	if err := validateOperationContext(op, ctx); err != nil {
+		return err
 	}
+	if err := validateStatusEnvelope(op, msg); err != nil {
+		return err
+	}
+	if _, err := c.session.Connection(); err != nil {
+		return toPublicError(err)
+	}
+
+	subject, err := c.subjects.StatusSubject(msg.Target)
+	if err != nil {
+		return toPublicError(err)
+	}
+
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		return &Error{
+			Code:      CodeEncodeFailed,
+			Op:        "publish_status_encode",
+			Subject:   subject,
+			Message:   "failed to encode status envelope",
+			Retryable: false,
+			Err:       err,
+		}
+	}
+
+	return c.publishPayload(ctx, op, string(registry.KindStatus), subject, payload)
 }
 
 // StoreDesiredConfig writes desired configuration to JetStream KV.
@@ -614,4 +755,101 @@ func toPublicError(err error) error {
 		Retryable: internal.Retryable,
 		Err:       internal.Err,
 	}
+}
+
+func validateConfigureCommand(op string, cmd ConfigureCommand) error {
+	if err := requiredString(op, "version", cmd.Version); err != nil {
+		return err
+	}
+	if err := requiredString(op, "rpc_id", cmd.RPCID); err != nil {
+		return err
+	}
+	if err := requiredString(op, "target", cmd.Target); err != nil {
+		return err
+	}
+	if err := requiredString(op, "uuid", cmd.UUID); err != nil {
+		return err
+	}
+	if err := requiredTimestamp(op, "timestamp", cmd.Timestamp); err != nil {
+		return err
+	}
+	return requiredJSON(op, "payload", cmd.Payload)
+}
+
+func validateOperationContext(op string, ctx context.Context) error {
+	if ctx == nil {
+		return validationError(op, "context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return &Error{
+			Code:      CodeValidation,
+			Op:        op,
+			Message:   "context is not usable",
+			Retryable: false,
+			Err:       err,
+		}
+	}
+	return nil
+}
+
+func (c *Client) publishPayload(ctx context.Context, op, kind, subject string, payload []byte) error {
+	nc, err := c.session.Connection()
+	if err != nil {
+		return toPublicError(err)
+	}
+
+	started := time.Now()
+
+	if err := nc.Publish(subject, payload); err != nil {
+		if c.options.metrics != nil {
+			c.options.metrics.IncPublish(kind, subject, "failure")
+		}
+		return &Error{
+			Code:      CodePublishFailed,
+			Op:        op,
+			Subject:   subject,
+			Message:   "publish failed",
+			Retryable: true,
+			Err:       err,
+		}
+	}
+
+	flushCtx, cancel := c.publishContext(ctx)
+	defer cancel()
+
+	if err := nc.FlushWithContext(flushCtx); err != nil {
+		if c.options.metrics != nil {
+			c.options.metrics.IncPublish(kind, subject, "failure")
+		}
+		return &Error{
+			Code:      CodePublishFailed,
+			Op:        op,
+			Subject:   subject,
+			Message:   "flush failed",
+			Retryable: true,
+			Err:       err,
+		}
+	}
+
+	if c.options.metrics != nil {
+		c.options.metrics.IncPublish(kind, subject, "success")
+		c.options.metrics.ObservePublishLatency(kind, subject, time.Since(started))
+	}
+
+	return nil
+}
+
+func (c *Client) publishContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		return context.WithCancel(context.Background())
+	}
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}
+	}
+
+	timeout := c.session.EffectiveConfig().Timeouts.PublishTimeout
+	if timeout <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, timeout)
 }

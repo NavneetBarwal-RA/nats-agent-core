@@ -99,7 +99,7 @@ type Client struct {
 	subMu         sync.Mutex
 	subscriptions *registry.Registry
 	subjects      *subjects.Builder
-	publisher     *transport.Publisher
+	publisher     publisher
 	handlerCtx    context.Context
 	handlerCancel context.CancelFunc
 
@@ -111,6 +111,11 @@ type Client struct {
 	startSessionFn               func(context.Context) error
 	activateAllSubscriptionsFn   func(string) error
 	deactivateAllSubscriptionsFn func(string) error
+	storeDesiredConfigFn         func(context.Context, DesiredConfigRecord) (*StoredDesiredConfig, error)
+}
+
+type publisher interface {
+	Publish(ctx context.Context, op, kind, subject string, payload []byte) error
 }
 
 // New validates public options and constructs a bootstrap client facade.
@@ -333,10 +338,6 @@ func (c *Client) SubmitConfigure(ctx context.Context, cmd ConfigureCommand) (*Su
 	if err := validateConfigureCommand(op, cmd); err != nil {
 		return nil, err
 	}
-	if _, err := c.session.Connection(); err != nil {
-		return nil, toPublicError(err)
-	}
-
 	stored, err := c.StoreDesiredConfig(ctx, DesiredConfigRecord{
 		Version:   cmd.Version,
 		RPCID:     cmd.RPCID,
@@ -414,10 +415,6 @@ func (c *Client) SubmitAction(ctx context.Context, cmd ActionCommand) (*Submissi
 	if err := validateActionCommand(op, cmd); err != nil {
 		return nil, err
 	}
-	if _, err := c.session.Connection(); err != nil {
-		return nil, toPublicError(err)
-	}
-
 	subject, err := c.subjects.ActionSubject(cmd.Target, cmd.Action)
 	if err != nil {
 		return nil, toPublicError(err)
@@ -458,10 +455,6 @@ func (c *Client) PublishResult(ctx context.Context, msg ResultEnvelope) error {
 	if err := validateResultEnvelope(op, msg); err != nil {
 		return err
 	}
-	if _, err := c.session.Connection(); err != nil {
-		return toPublicError(err)
-	}
-
 	subject, err := c.subjects.ResultSubject(msg.Target)
 	if err != nil {
 		return toPublicError(err)
@@ -495,10 +488,6 @@ func (c *Client) PublishStatus(ctx context.Context, msg StatusEnvelope) error {
 	if err := validateStatusEnvelope(op, msg); err != nil {
 		return err
 	}
-	if _, err := c.session.Connection(); err != nil {
-		return toPublicError(err)
-	}
-
 	subject, err := c.subjects.StatusSubject(msg.Target)
 	if err != nil {
 		return toPublicError(err)
@@ -524,6 +513,9 @@ func (c *Client) PublishStatus(ctx context.Context, msg StatusEnvelope) error {
 
 // StoreDesiredConfig writes desired configuration to JetStream KV.
 func (c *Client) StoreDesiredConfig(ctx context.Context, rec DesiredConfigRecord) (*StoredDesiredConfig, error) {
+	if c.storeDesiredConfigFn != nil {
+		return c.storeDesiredConfigFn(ctx, rec)
+	}
 	stored, err := c.kv.StoreDesiredConfig(ctx, toKVRecord(rec))
 	if err != nil {
 		return nil, toPublicError(err)

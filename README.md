@@ -164,6 +164,20 @@ As of the current implementation:
 2. Calling side receives the message through the library
 3. Correlation is performed using shared message fields
 
+### Configure store-then-notify semantics
+
+`SubmitConfigure(...)` performs two separate operations:
+- store desired configuration in JetStream KV
+- publish a lightweight configure notification on NATS
+
+`SubmitConfigure(...)` is a store-then-notify operation, not an atomic transaction across KV storage and NATS publish. If KV storage succeeds but configure notification publish fails, the desired config remains stored and the caller receives the publish error.
+
+There is currently no separate public API to retry only the configure notification. Callers that want to retry through the public API can retry `SubmitConfigure(...)` with the same command, with the understanding that this may create a new KV revision. Target agents can also use `WatchDesiredConfig(...)`, `StartupReconcile(...)`, or `LoadDesiredConfig(...)` to observe the latest durable desired state depending on their workflow.
+
+### Context behavior for send APIs
+
+Public send APIs (`SubmitConfigure(...)`, `SubmitAction(...)`, `PublishResult(...)`, and `PublishStatus(...)`) require a non-nil, active context. Nil or already canceled contexts are rejected before any KV store or publish work is attempted. The library does not silently replace nil context with `context.Background()`; callers are expected to provide cancellation and timeout behavior explicitly.
+
 ---
 
 ## Default subject model

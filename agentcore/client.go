@@ -329,6 +329,8 @@ func (c *Client) Health() HealthSnapshot {
 }
 
 // SubmitConfigure stores desired configuration in KV and publishes a configure notification.
+// The operation is store-then-notify and is not atomic across KV and NATS publish;
+// if notification publish fails after KV storage succeeds, the stored desired config remains.
 func (c *Client) SubmitConfigure(ctx context.Context, cmd ConfigureCommand) (*SubmissionAck, error) {
 	const op = "submit_configure"
 

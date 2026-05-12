@@ -304,9 +304,9 @@ func (c *Client) cleanupSubscription(sub *nats.Subscription, op, registrationID,
 
 func (c *Client) deactivateAllSubscriptions(op string) error {
 	c.subMu.Lock()
-	defer c.subMu.Unlock()
-
 	handles := c.subscriptions.ClearActiveHandles()
+	c.subMu.Unlock()
+
 	var joined error
 	for _, handle := range handles {
 		if handle.Sub == nil {

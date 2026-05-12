@@ -207,32 +207,47 @@ Commit note:
 
 ---
 
-### Phase 5 - Subscribe APIs, Handlers, and Reconnect Restore
+### Phase 5 - Bidirectional Send/Receive APIs, Handlers, and Reconnect Restore
 Goal:
+- public send wrappers
+- public publish wrappers
 - subscribe wrappers
 - handler registration
 - callback binding
 - reconnect-safe subscription restore
 - receive-side result correlation
+- public sender-to-receiver integration coverage
 
 Main requirements to review:
 - NATS-LIB-04
+- NATS-LIB-15
 - NATS-LIB-16
 - NATS-LIB-17
+- NATS-LIB-20
+- NATS-LIB-21
+- NATS-LIB-22
 - NATS-LIB-23
 - NATS-LIB-25
 
 Checklist:
-- [ ] Common subscribe wrappers exist
+- [ ] SubmitConfigure exists and uses store-then-notify
+- [ ] SubmitAction exists and uses direct publish
+- [ ] PublishResult exists
+- [ ] PublishStatus exists
+- [ ] common subscribe wrappers exist
 - [ ] handler registration methods exist
 - [ ] callback binding is clear and reusable
 - [ ] subscription registry exists
-- [ ] reconnect restoration uses the saved registry
-- [ ] received results expose `rpc_id` clearly for correlation
+- [ ] reconnect restoration uses saved registry intent
+- [ ] received results expose rpc_id clearly for correlation
+- [ ] subscription readiness is synchronized before marking active
 - [ ] startup/recovery flows and receive-side handlers work together cleanly
+- [ ] public sender-to-receiver integration tests exist
+- [ ] action/result round-trip integration test exists
+- [ ] reconnect restore is verified with public PublishResult after restart
 
 Commit note:
-- `feat(handlers): add subscribe wrappers, handler registration, and reconnect restoration`
+- `feat(phase5): add bidirectional send/receive transport and reconnect restoration`
 
 ---
 

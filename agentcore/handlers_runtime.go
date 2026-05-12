@@ -176,9 +176,6 @@ func (c *Client) activateAfterRegistration(id, op string) error {
 		return nil
 	}
 
-	c.subMu.Lock()
-	defer c.subMu.Unlock()
-
 	if err := c.activateRegisteredSubscriptionByID(id, false, op); err != nil {
 		return err
 	}
@@ -187,9 +184,6 @@ func (c *Client) activateAfterRegistration(id, op string) error {
 }
 
 func (c *Client) activateAllRegisteredSubscriptions(op string) error {
-	c.subMu.Lock()
-	defer c.subMu.Unlock()
-
 	records := c.subscriptions.ListActivations()
 	var joined error
 	for _, rec := range records {
@@ -202,9 +196,6 @@ func (c *Client) activateAllRegisteredSubscriptions(op string) error {
 }
 
 func (c *Client) restoreAllRegisteredSubscriptions() error {
-	c.subMu.Lock()
-	defer c.subMu.Unlock()
-
 	records := c.subscriptions.RestoreRecords()
 	var joined error
 	for _, rec := range records {
@@ -217,11 +208,25 @@ func (c *Client) restoreAllRegisteredSubscriptions() error {
 }
 
 func (c *Client) activateRegisteredSubscriptionByID(id string, force bool, op string) error {
-	rec, ok := c.subscriptions.GetActivationRecord(id)
+	rec, ok := c.activationRecordByID(id, force)
 	if !ok {
 		return nil
 	}
 	return c.activateRecord(rec, force, op)
+}
+
+func (c *Client) activationRecordByID(id string, force bool) (registry.ActivationRecord, bool) {
+	c.subMu.Lock()
+	defer c.subMu.Unlock()
+
+	rec, ok := c.subscriptions.GetActivationRecord(id)
+	if !ok {
+		return registry.ActivationRecord{}, false
+	}
+	if rec.Active && !force {
+		return registry.ActivationRecord{}, false
+	}
+	return rec, true
 }
 
 func (c *Client) activateRecord(rec registry.ActivationRecord, force bool, op string) error {
@@ -230,35 +235,15 @@ func (c *Client) activateRecord(rec registry.ActivationRecord, force bool, op st
 	}
 
 	if force && rec.ActiveSub != nil {
-		if err := rec.ActiveSub.Unsubscribe(); err != nil {
-			c.logWarn("failed to unsubscribe stale subscription before restore", "registration_id", rec.ID, "subject", rec.Subject, "error", err)
-		}
+		c.cleanupSubscription(rec.ActiveSub, op, rec.ID, rec.Subject, "failed to unsubscribe stale subscription before restore")
 	}
 
-	var (
-		sub *nats.Subscription
-		err error
-	)
-	switch rec.Kind {
-	case registry.KindConfigure:
-		sub, err = c.subscribeConfigure(rec.Subject, rec.QueueGroup, rec.Callback)
-	case registry.KindAction:
-		sub, err = c.subscribeAction(rec.Subject, rec.QueueGroup, rec.Callback)
-	case registry.KindResult:
-		sub, err = c.subscribeResult(rec.Subject, rec.QueueGroup, rec.Callback)
-	case registry.KindStatus:
-		sub, err = c.subscribeStatus(rec.Subject, rec.QueueGroup, rec.Callback)
-	default:
-		err = &Error{
-			Code:      CodeValidation,
-			Op:        op,
-			Subject:   rec.Subject,
-			Message:   "unsupported subscription kind",
-			Retryable: false,
-		}
-	}
+	sub, err := c.createSubscriptionForRecord(rec, op)
 	if err != nil {
+		c.subMu.Lock()
 		c.subscriptions.MarkInactive(rec.ID, err)
+		c.subMu.Unlock()
+
 		c.logError("subscription activation failed", "operation", op, "registration_id", rec.ID, "subject", rec.Subject, "kind", string(rec.Kind), "error", err)
 		if c.options.metrics != nil {
 			c.options.metrics.IncSubscribe(string(rec.Kind), rec.Subject, "failure")
@@ -266,12 +251,55 @@ func (c *Client) activateRecord(rec registry.ActivationRecord, force bool, op st
 		return err
 	}
 
-	c.subscriptions.MarkActive(rec.ID, sub)
+	c.subMu.Lock()
+	_, exists := c.subscriptions.GetActivationRecord(rec.ID)
+	if exists {
+		c.subscriptions.MarkActive(rec.ID, sub)
+	}
+	c.subMu.Unlock()
+	if !exists {
+		c.cleanupSubscription(sub, op, rec.ID, rec.Subject, "failed to cleanup active subscription after registration was removed during activation")
+		return nil
+	}
+
 	c.logInfo("subscription activated", "operation", op, "registration_id", rec.ID, "subject", rec.Subject, "kind", string(rec.Kind), "queue_group", rec.QueueGroup)
 	if c.options.metrics != nil {
 		c.options.metrics.IncSubscribe(string(rec.Kind), rec.Subject, "success")
 	}
 	return nil
+}
+
+func (c *Client) createSubscriptionForRecord(rec registry.ActivationRecord, op string) (*nats.Subscription, error) {
+	switch rec.Kind {
+	case registry.KindConfigure:
+		return c.subscribeConfigure(rec.Subject, rec.QueueGroup, rec.Callback)
+	case registry.KindAction:
+		return c.subscribeAction(rec.Subject, rec.QueueGroup, rec.Callback)
+	case registry.KindResult:
+		return c.subscribeResult(rec.Subject, rec.QueueGroup, rec.Callback)
+	case registry.KindStatus:
+		return c.subscribeStatus(rec.Subject, rec.QueueGroup, rec.Callback)
+	default:
+		return nil, &Error{
+			Code:      CodeValidation,
+			Op:        op,
+			Subject:   rec.Subject,
+			Message:   "unsupported subscription kind",
+			Retryable: false,
+		}
+	}
+}
+
+func (c *Client) cleanupSubscription(sub *nats.Subscription, op, registrationID, subject, message string) {
+	if sub == nil {
+		return
+	}
+	if err := sub.Unsubscribe(); err != nil {
+		c.logWarn(message, "operation", op, "registration_id", registrationID, "subject", subject, "error", err)
+		if c.options.errorSink != nil {
+			c.options.errorSink(err)
+		}
+	}
 }
 
 func (c *Client) deactivateAllSubscriptions(op string) error {

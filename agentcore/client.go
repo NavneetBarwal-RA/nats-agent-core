@@ -328,7 +328,7 @@ func (c *Client) Health() HealthSnapshot {
 	return fromSessionHealth(c.session.HealthSnapshot())
 }
 
-// SubmitConfigure accepts a configure command for later-phase transport logic.
+// SubmitConfigure stores desired configuration in KV and publishes a configure notification.
 func (c *Client) SubmitConfigure(ctx context.Context, cmd ConfigureCommand) (*SubmissionAck, error) {
 	const op = "submit_configure"
 
@@ -405,7 +405,7 @@ func (c *Client) SubmitConfigure(ctx context.Context, cmd ConfigureCommand) (*Su
 	}, nil
 }
 
-// SubmitAction accepts an action command for later-phase transport logic.
+// SubmitAction publishes an action command to the target action subject.
 func (c *Client) SubmitAction(ctx context.Context, cmd ActionCommand) (*SubmissionAck, error) {
 	const op = "submit_action"
 
@@ -445,7 +445,7 @@ func (c *Client) SubmitAction(ctx context.Context, cmd ActionCommand) (*Submissi
 	}, nil
 }
 
-// PublishResult publishes a result envelope in later phases.
+// PublishResult publishes a result envelope to the target result subject.
 func (c *Client) PublishResult(ctx context.Context, msg ResultEnvelope) error {
 	const op = "publish_result"
 
@@ -478,7 +478,7 @@ func (c *Client) PublishResult(ctx context.Context, msg ResultEnvelope) error {
 	return nil
 }
 
-// PublishStatus publishes a status envelope in later phases.
+// PublishStatus publishes a status envelope to the target status subject.
 func (c *Client) PublishStatus(ctx context.Context, msg StatusEnvelope) error {
 	const op = "publish_status"
 

@@ -9,8 +9,11 @@ import (
 	"time"
 
 	"github.com/routerarchitects/nats-agent-core/internal/kv"
+	"github.com/routerarchitects/nats-agent-core/internal/registry"
 	"github.com/routerarchitects/nats-agent-core/internal/runtimeerr"
 	"github.com/routerarchitects/nats-agent-core/internal/session"
+	"github.com/routerarchitects/nats-agent-core/internal/subjects"
+	"github.com/routerarchitects/nats-agent-core/internal/transport"
 )
 
 // ConfigureHandler handles configure notifications for a target.
@@ -93,8 +96,26 @@ type Client struct {
 	session *session.Manager
 	kv      *kv.Store
 
+	subMu         sync.Mutex
+	subscriptions *registry.Registry
+	subjects      *subjects.Builder
+	publisher     publisher
+	handlerCtx    context.Context
+	handlerCancel context.CancelFunc
+
 	nextWatchID uint64
 	watches     map[uint64]StopFunc
+
+	callbacksEnabled atomic.Bool
+
+	startSessionFn               func(context.Context) error
+	activateAllSubscriptionsFn   func(string) error
+	deactivateAllSubscriptionsFn func(string) error
+	storeDesiredConfigFn         func(context.Context, DesiredConfigRecord) (*StoredDesiredConfig, error)
+}
+
+type publisher interface {
+	Publish(ctx context.Context, op, kind, subject string, payload []byte) error
 }
 
 // New validates public options and constructs a bootstrap client facade.
@@ -118,6 +139,22 @@ func New(cfg Config, opts ...Option) (*Client, error) {
 		options.metrics = cfg.Observe.Metrics
 	}
 
+	subPatterns, err := subjects.PatternsFromConfig(subjects.Config{
+		ConfigurePattern: cfg.Subjects.ConfigurePattern,
+		ActionPattern:    cfg.Subjects.ActionPattern,
+		ResultPattern:    cfg.Subjects.ResultPattern,
+		StatusPattern:    cfg.Subjects.StatusPattern,
+		HealthPattern:    cfg.Subjects.HealthPattern,
+	})
+	if err != nil {
+		return nil, toPublicError(err)
+	}
+
+	subjectBuilder, err := subjects.NewBuilder(subPatterns)
+	if err != nil {
+		return nil, toPublicError(err)
+	}
+
 	runtime, err := session.NewManager(toSessionConfig(cfg), session.Hooks{
 		Logger:    options.logger,
 		Metrics:   options.metrics,
@@ -131,14 +168,32 @@ func New(cfg Config, opts ...Option) (*Client, error) {
 	if err != nil {
 		return nil, toPublicError(err)
 	}
+	publisher, err := transport.NewPublisher(
+		runtime,
+		func() time.Duration {
+			return runtime.EffectiveConfig().Timeouts.PublishTimeout
+		},
+		options.metrics,
+	)
+	if err != nil {
+		return nil, toPublicError(err)
+	}
 
-	return &Client{
-		cfg:     cfg,
-		options: options,
-		session: runtime,
-		kv:      store,
-		watches: make(map[uint64]StopFunc),
-	}, nil
+	client := &Client{
+		cfg:           cfg,
+		options:       options,
+		session:       runtime,
+		kv:            store,
+		subscriptions: registry.New(),
+		subjects:      subjectBuilder,
+		publisher:     publisher,
+		watches:       make(map[uint64]StopFunc),
+	}
+	client.syncSubscriptionHealth()
+	runtime.SetReconnectHandler(client.onSessionReconnected)
+	runtime.SetClosedHandler(client.onSessionClosed)
+
+	return client, nil
 }
 
 // Config returns the bootstrap configuration snapshot.
@@ -150,15 +205,39 @@ func (c *Client) Config() Config {
 
 // Start begins the client lifecycle.
 func (c *Client) Start(ctx context.Context) error {
-	return toPublicError(c.session.Start(ctx))
+	if err := c.startSession(ctx); err != nil {
+		return err
+	}
+
+	if err := c.activateAllSubscriptions("start"); err != nil {
+		c.callbacksEnabled.Store(false)
+		c.cancelHandlerContext()
+		if cleanupErr := c.deactivateAllSubscriptionsWithOp("start_activation_cleanup"); cleanupErr != nil {
+			c.logWarn("failed to cleanup subscriptions after start activation failure", "error", cleanupErr)
+			if c.options.errorSink != nil {
+				c.options.errorSink(cleanupErr)
+			}
+		}
+		return err
+	}
+
+	c.ensureHandlerContext()
+	c.callbacksEnabled.Store(true)
+	return nil
 }
 
 // Close ends the client lifecycle with watch cleanup and connection drain.
 func (c *Client) Close(ctx context.Context) error {
+	c.callbacksEnabled.Store(false)
+	c.cancelHandlerContext()
+	subErr := c.deactivateAllSubscriptionsWithOp("close")
 	watchErr := c.stopAllWatches()
 	sessionErr := toPublicError(c.session.Close(ctx))
 
-	if watchErr != nil && sessionErr == nil {
+	if subErr != nil && watchErr == nil && sessionErr == nil {
+		return subErr
+	}
+	if watchErr != nil && sessionErr == nil && subErr == nil {
 		return &Error{
 			Code:      CodeShutdown,
 			Op:        "close_stop_watches",
@@ -167,16 +246,78 @@ func (c *Client) Close(ctx context.Context) error {
 			Err:       watchErr,
 		}
 	}
-	if watchErr != nil && sessionErr != nil {
+	if subErr != nil || watchErr != nil || sessionErr != nil {
+		joined := errors.Join(subErr, watchErr, sessionErr)
 		return &Error{
 			Code:      CodeShutdown,
 			Op:        "close",
-			Message:   "close failed with watch-stop and session shutdown errors",
+			Message:   "close failed with subscription, watch-stop, or session shutdown errors",
 			Retryable: true,
-			Err:       errors.Join(watchErr, sessionErr),
+			Err:       joined,
 		}
 	}
 	return sessionErr
+}
+
+func (c *Client) startSession(ctx context.Context) error {
+	if c.startSessionFn != nil {
+		return c.startSessionFn(ctx)
+	}
+	return toPublicError(c.session.Start(ctx))
+}
+
+func (c *Client) activateAllSubscriptions(op string) error {
+	if c.activateAllSubscriptionsFn != nil {
+		return c.activateAllSubscriptionsFn(op)
+	}
+	return c.activateAllRegisteredSubscriptions(op)
+}
+
+func (c *Client) deactivateAllSubscriptionsWithOp(op string) error {
+	if c.deactivateAllSubscriptionsFn != nil {
+		return c.deactivateAllSubscriptionsFn(op)
+	}
+	return c.deactivateAllSubscriptions(op)
+}
+
+func (c *Client) ensureHandlerContext() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.handlerCtx != nil {
+		select {
+		case <-c.handlerCtx.Done():
+			// Existing lifecycle context is canceled and must be replaced.
+		default:
+			// Existing lifecycle context is still active; keep it.
+			return
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	c.handlerCtx = ctx
+	c.handlerCancel = cancel
+}
+
+func (c *Client) cancelHandlerContext() {
+	c.mu.Lock()
+	cancel := c.handlerCancel
+	c.handlerCtx = nil
+	c.handlerCancel = nil
+	c.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (c *Client) handlerContext() context.Context {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if c.handlerCtx != nil {
+		return c.handlerCtx
+	}
+	return context.Background()
 }
 
 // Health returns the latest public health snapshot.
@@ -187,60 +328,196 @@ func (c *Client) Health() HealthSnapshot {
 	return fromSessionHealth(c.session.HealthSnapshot())
 }
 
-// SubmitConfigure accepts a configure command for later-phase transport logic.
+// SubmitConfigure stores desired configuration in KV and publishes a configure notification.
+// The operation is store-then-notify and is not atomic across KV and NATS publish;
+// if notification publish fails after KV storage succeeds, the stored desired config remains.
 func (c *Client) SubmitConfigure(ctx context.Context, cmd ConfigureCommand) (*SubmissionAck, error) {
-	_ = ctx
-	_ = cmd
+	const op = "submit_configure"
 
-	return nil, &Error{
-		Code:      CodeNotImplemented,
-		Op:        "submit_configure",
-		Message:   "SubmitConfigure is not implemented in bootstrap phase",
-		Retryable: false,
+	if err := validateOperationContext(op, ctx); err != nil {
+		return nil, err
 	}
+	if err := validateConfigureCommand(op, cmd); err != nil {
+		return nil, err
+	}
+	stored, err := c.StoreDesiredConfig(ctx, DesiredConfigRecord{
+		Version:   cmd.Version,
+		RPCID:     cmd.RPCID,
+		Target:    cmd.Target,
+		UUID:      cmd.UUID,
+		Payload:   cmd.Payload,
+		Timestamp: cmd.Timestamp,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if stored == nil {
+		return nil, &Error{
+			Code:      CodeKVStoreFailed,
+			Op:        "submit_configure_store_desired",
+			Message:   "desired config store returned nil result",
+			Retryable: true,
+		}
+	}
+
+	subject, err := c.subjects.ConfigureSubject(cmd.Target)
+	if err != nil {
+		return nil, toPublicError(err)
+	}
+
+	notification := ConfigureNotification{
+		Version:     cmd.Version,
+		RPCID:       cmd.RPCID,
+		Target:      cmd.Target,
+		CommandType: "configure",
+		UUID:        cmd.UUID,
+		KVBucket:    stored.Bucket,
+		KVKey:       stored.Key,
+		Timestamp:   c.options.now().UTC(),
+	}
+	if err := validateConfigureNotification(op, notification); err != nil {
+		return nil, err
+	}
+
+	payload, err := json.Marshal(notification)
+	if err != nil {
+		return nil, &Error{
+			Code:      CodeEncodeFailed,
+			Op:        "submit_configure_encode_notification",
+			Subject:   subject,
+			Message:   "failed to encode configure notification",
+			Retryable: false,
+			Err:       err,
+		}
+	}
+
+	if err := c.publisher.Publish(ctx, "submit_configure_publish_notification", string(registry.KindConfigure), subject, payload); err != nil {
+		return nil, toPublicError(err)
+	}
+
+	return &SubmissionAck{
+		Accepted:   true,
+		RPCID:      cmd.RPCID,
+		Target:     cmd.Target,
+		Subject:    subject,
+		AcceptedAt: notification.Timestamp,
+		KVBucket:   stored.Bucket,
+		KVKey:      stored.Key,
+		KVRevision: stored.Revision,
+	}, nil
 }
 
-// SubmitAction accepts an action command for later-phase transport logic.
+// SubmitAction publishes an action command to the target action subject.
 func (c *Client) SubmitAction(ctx context.Context, cmd ActionCommand) (*SubmissionAck, error) {
-	_ = ctx
-	_ = cmd
+	const op = "submit_action"
 
-	return nil, &Error{
-		Code:      CodeNotImplemented,
-		Op:        "submit_action",
-		Message:   "SubmitAction is not implemented in bootstrap phase",
-		Retryable: false,
+	if err := validateOperationContext(op, ctx); err != nil {
+		return nil, err
 	}
+	if err := validateActionCommand(op, cmd); err != nil {
+		return nil, err
+	}
+	subject, err := c.subjects.ActionSubject(cmd.Target, cmd.Action)
+	if err != nil {
+		return nil, toPublicError(err)
+	}
+
+	payload, err := json.Marshal(cmd)
+	if err != nil {
+		return nil, &Error{
+			Code:      CodeEncodeFailed,
+			Op:        "submit_action_encode",
+			Subject:   subject,
+			Message:   "failed to encode action command",
+			Retryable: false,
+			Err:       err,
+		}
+	}
+
+	if err := c.publisher.Publish(ctx, "submit_action_publish", string(registry.KindAction), subject, payload); err != nil {
+		return nil, toPublicError(err)
+	}
+
+	return &SubmissionAck{
+		Accepted:   true,
+		RPCID:      cmd.RPCID,
+		Target:     cmd.Target,
+		Subject:    subject,
+		AcceptedAt: c.options.now().UTC(),
+	}, nil
 }
 
-// PublishResult publishes a result envelope in later phases.
+// PublishResult publishes a result envelope to the target result subject.
 func (c *Client) PublishResult(ctx context.Context, msg ResultEnvelope) error {
-	_ = ctx
-	_ = msg
+	const op = "publish_result"
 
-	return &Error{
-		Code:      CodeNotImplemented,
-		Op:        "publish_result",
-		Message:   "PublishResult is not implemented in bootstrap phase",
-		Retryable: false,
+	if err := validateOperationContext(op, ctx); err != nil {
+		return err
 	}
+	if err := validateResultEnvelope(op, msg); err != nil {
+		return err
+	}
+	subject, err := c.subjects.ResultSubject(msg.Target)
+	if err != nil {
+		return toPublicError(err)
+	}
+
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		return &Error{
+			Code:      CodeEncodeFailed,
+			Op:        "publish_result_encode",
+			Subject:   subject,
+			Message:   "failed to encode result envelope",
+			Retryable: false,
+			Err:       err,
+		}
+	}
+
+	if err := c.publisher.Publish(ctx, op, string(registry.KindResult), subject, payload); err != nil {
+		return toPublicError(err)
+	}
+	return nil
 }
 
-// PublishStatus publishes a status envelope in later phases.
+// PublishStatus publishes a status envelope to the target status subject.
 func (c *Client) PublishStatus(ctx context.Context, msg StatusEnvelope) error {
-	_ = ctx
-	_ = msg
+	const op = "publish_status"
 
-	return &Error{
-		Code:      CodeNotImplemented,
-		Op:        "publish_status",
-		Message:   "PublishStatus is not implemented in bootstrap phase",
-		Retryable: false,
+	if err := validateOperationContext(op, ctx); err != nil {
+		return err
 	}
+	if err := validateStatusEnvelope(op, msg); err != nil {
+		return err
+	}
+	subject, err := c.subjects.StatusSubject(msg.Target)
+	if err != nil {
+		return toPublicError(err)
+	}
+
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		return &Error{
+			Code:      CodeEncodeFailed,
+			Op:        "publish_status_encode",
+			Subject:   subject,
+			Message:   "failed to encode status envelope",
+			Retryable: false,
+			Err:       err,
+		}
+	}
+
+	if err := c.publisher.Publish(ctx, op, string(registry.KindStatus), subject, payload); err != nil {
+		return toPublicError(err)
+	}
+	return nil
 }
 
 // StoreDesiredConfig writes desired configuration to JetStream KV.
 func (c *Client) StoreDesiredConfig(ctx context.Context, rec DesiredConfigRecord) (*StoredDesiredConfig, error) {
+	if c.storeDesiredConfigFn != nil {
+		return c.storeDesiredConfigFn(ctx, rec)
+	}
 	stored, err := c.kv.StoreDesiredConfig(ctx, toKVRecord(rec))
 	if err != nil {
 		return nil, toPublicError(err)
@@ -299,59 +576,22 @@ func (c *Client) StartupReconcile(ctx context.Context, target string) (*StoredDe
 
 // RegisterConfigureHandler registers a configure notification handler.
 func (c *Client) RegisterConfigureHandler(target string, handler ConfigureHandler, opts ...SubscriptionOption) error {
-	_ = target
-	_ = handler
-	_ = opts
-
-	return &Error{
-		Code:      CodeNotImplemented,
-		Op:        "register_configure_handler",
-		Message:   "RegisterConfigureHandler is not implemented in bootstrap phase",
-		Retryable: false,
-	}
+	return c.registerConfigureHandler(target, handler, opts...)
 }
 
 // RegisterActionHandler registers a target/action handler.
 func (c *Client) RegisterActionHandler(target, action string, handler ActionHandler, opts ...SubscriptionOption) error {
-	_ = target
-	_ = action
-	_ = handler
-	_ = opts
-
-	return &Error{
-		Code:      CodeNotImplemented,
-		Op:        "register_action_handler",
-		Message:   "RegisterActionHandler is not implemented in bootstrap phase",
-		Retryable: false,
-	}
+	return c.registerActionHandler(target, action, handler, opts...)
 }
 
 // RegisterResultHandler registers a result handler.
 func (c *Client) RegisterResultHandler(target string, handler ResultHandler, opts ...SubscriptionOption) error {
-	_ = target
-	_ = handler
-	_ = opts
-
-	return &Error{
-		Code:      CodeNotImplemented,
-		Op:        "register_result_handler",
-		Message:   "RegisterResultHandler is not implemented in bootstrap phase",
-		Retryable: false,
-	}
+	return c.registerResultHandler(target, handler, opts...)
 }
 
 // RegisterStatusHandler registers a status handler.
 func (c *Client) RegisterStatusHandler(target string, handler StatusHandler, opts ...SubscriptionOption) error {
-	_ = target
-	_ = handler
-	_ = opts
-
-	return &Error{
-		Code:      CodeNotImplemented,
-		Op:        "register_status_handler",
-		Message:   "RegisterStatusHandler is not implemented in bootstrap phase",
-		Retryable: false,
-	}
+	return c.registerStatusHandler(target, handler, opts...)
 }
 
 func (c *Client) trackWatch(stop StopFunc) StopFunc {
@@ -528,4 +768,39 @@ func toPublicError(err error) error {
 		Retryable: internal.Retryable,
 		Err:       internal.Err,
 	}
+}
+
+func validateConfigureCommand(op string, cmd ConfigureCommand) error {
+	if err := requiredString(op, "version", cmd.Version); err != nil {
+		return err
+	}
+	if err := requiredString(op, "rpc_id", cmd.RPCID); err != nil {
+		return err
+	}
+	if err := requiredString(op, "target", cmd.Target); err != nil {
+		return err
+	}
+	if err := requiredString(op, "uuid", cmd.UUID); err != nil {
+		return err
+	}
+	if err := requiredTimestamp(op, "timestamp", cmd.Timestamp); err != nil {
+		return err
+	}
+	return requiredJSON(op, "payload", cmd.Payload)
+}
+
+func validateOperationContext(op string, ctx context.Context) error {
+	if ctx == nil {
+		return validationError(op, "context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return &Error{
+			Code:      CodeValidation,
+			Op:        op,
+			Message:   "context is not usable",
+			Retryable: false,
+			Err:       err,
+		}
+	}
+	return nil
 }

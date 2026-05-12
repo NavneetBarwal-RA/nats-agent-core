@@ -4,12 +4,12 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/routerarchitects/nats-agent-core/agentcore"
+	"github.com/routerarchitects/nats-agent-core/internal/runtimeerr"
 )
 
 func validationError(op, msg string) error {
-	return &agentcore.Error{
-		Code:      agentcore.CodeValidation,
+	return &runtimeerr.Error{
+		Code:      runtimeerr.CodeValidation,
 		Op:        op,
 		Message:   msg,
 		Retryable: false,
@@ -82,4 +82,3 @@ func validatePattern(name, pattern string, placeholders int) error {
 
 	return nil
 }
-

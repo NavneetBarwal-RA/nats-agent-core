@@ -5,19 +5,19 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/routerarchitects/nats-agent-core/agentcore"
+	"github.com/routerarchitects/nats-agent-core/internal/runtimeerr"
 )
 
-func requireAgentcoreError(t *testing.T, err error, wantCode agentcore.Code, wantOp string, wantMsgPart string) *agentcore.Error {
+func requireRuntimeError(t *testing.T, err error, wantCode runtimeerr.Code, wantOp string, wantMsgPart string) *runtimeerr.Error {
 	t.Helper()
 
 	if err == nil {
 		t.Fatal("expected non-nil error")
 	}
 
-	var got *agentcore.Error
+	var got *runtimeerr.Error
 	if !errors.As(err, &got) {
-		t.Fatalf("expected *agentcore.Error, got %T", err)
+		t.Fatalf("expected *runtimeerr.Error, got %T", err)
 	}
 	if got.Code != wantCode {
 		t.Fatalf("expected error code %q, got %q", wantCode, got.Code)
@@ -102,7 +102,7 @@ func TestValidateTargetRejectsMalformedValues(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			err := ValidateTarget(tc.target)
-			requireAgentcoreError(t, err, agentcore.CodeValidation, "validate_target", tc.msgPart)
+			requireRuntimeError(t, err, runtimeerr.CodeValidation, "validate_target", tc.msgPart)
 		})
 	}
 }
@@ -178,7 +178,7 @@ func TestValidateActionRejectsMalformedValues(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			err := ValidateAction(tc.action)
-			requireAgentcoreError(t, err, agentcore.CodeValidation, "validate_action", tc.msgPart)
+			requireRuntimeError(t, err, runtimeerr.CodeValidation, "validate_action", tc.msgPart)
 		})
 	}
 }
@@ -286,7 +286,7 @@ func TestValidatePatternRejectsInvalidPatterns(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			err := validatePattern(tc.field, tc.pattern, tc.placeholders)
-			requireAgentcoreError(t, err, agentcore.CodeValidation, "validate_subject_pattern", tc.msgPart)
+			requireRuntimeError(t, err, runtimeerr.CodeValidation, "validate_subject_pattern", tc.msgPart)
 		})
 	}
 }

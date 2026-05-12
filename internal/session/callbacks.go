@@ -32,9 +32,13 @@ func (m *Manager) onReconnect(nc *nats.Conn) {
 
 func (m *Manager) onClosed(_ *nats.Conn) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	m.setClosedLocked(nil)
+	onClosed := m.hooks.OnClosed
+	m.mu.Unlock()
+
+	if onClosed != nil {
+		onClosed()
+	}
 }
 
 func (m *Manager) onAsyncError(err error) {
@@ -84,18 +88,24 @@ func (m *Manager) rebindAfterReconnect(nc *nats.Conn) {
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	if m.closing {
+		m.mu.Unlock()
 		return
 	}
 	if m.nc == nil || m.nc != nc {
+		m.mu.Unlock()
 		return
 	}
 
 	m.js = js
 	m.kv = kv
 	m.setConnectedLocked(nc.ConnectedUrl(), true, true)
+	onReconnected := m.hooks.OnReconnected
+	m.mu.Unlock()
+
+	if onReconnected != nil {
+		onReconnected()
+	}
 }
 
 func isBucketNotFound(err error) bool {

@@ -21,6 +21,10 @@ type Hooks struct {
 	Logger    Logger
 	Metrics   Metrics
 	ErrorSink func(error)
+	// OnReconnected is called after session handles are rebound on reconnect.
+	OnReconnected func()
+	// OnClosed is called after the session transitions to a closed state.
+	OnClosed func()
 }
 
 // Config is the runtime session configuration.

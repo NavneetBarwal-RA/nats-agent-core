@@ -2,8 +2,6 @@ package subjects
 
 import (
 	"fmt"
-
-	"github.com/routerarchitects/nats-agent-core/agentcore"
 )
 
 const (
@@ -28,6 +26,15 @@ type Patterns struct {
 	HealthPattern    string
 }
 
+// Config contains optional subject-pattern overrides.
+type Config struct {
+	ConfigurePattern string
+	ActionPattern    string
+	ResultPattern    string
+	StatusPattern    string
+	HealthPattern    string
+}
+
 // DefaultPatterns returns the default routing patterns.
 func DefaultPatterns() Patterns {
 	return Patterns{
@@ -40,7 +47,7 @@ func DefaultPatterns() Patterns {
 }
 
 // PatternsFromConfig resolves configured patterns while preserving defaults.
-func PatternsFromConfig(cfg agentcore.SubjectConfig) (Patterns, error) {
+func PatternsFromConfig(cfg Config) (Patterns, error) {
 	p := DefaultPatterns()
 
 	if cfg.ConfigurePattern != "" {
@@ -152,4 +159,3 @@ func (b *Builder) HealthSubject(target string) (string, error) {
 	}
 	return fmt.Sprintf(b.patterns.HealthPattern, target), nil
 }
-

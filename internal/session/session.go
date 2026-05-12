@@ -88,6 +88,51 @@ func (m *Manager) KVTimeout() time.Duration {
 	return m.effective.Config.Timeouts.KVTimeout
 }
 
+// SubscribeTimeout returns the configured timeout for subscribe operations.
+func (m *Manager) SubscribeTimeout() time.Duration {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.effective.Config.Timeouts.SubscribeTimeout
+}
+
+// Connection returns the active NATS connection when runtime is connected.
+func (m *Manager) Connection() (*nats.Conn, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.nc == nil || m.nc.Status() != nats.CONNECTED {
+		return nil, &runtimeerr.Error{
+			Code:      runtimeerr.CodeDisconnected,
+			Op:        "connection",
+			Message:   "client runtime is not connected",
+			Retryable: true,
+		}
+	}
+	return m.nc, nil
+}
+
+// SetSubscriptionCounts updates health counters for subscription lifecycle.
+func (m *Manager) SetSubscriptionCounts(registered, active int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.health.RegisteredSubscriptions = registered
+	m.health.ActiveSubscriptions = active
+}
+
+// SetReconnectHandler updates the reconnect callback hook.
+func (m *Manager) SetReconnectHandler(fn func()) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.hooks.OnReconnected = fn
+}
+
+// SetClosedHandler updates the closed callback hook.
+func (m *Manager) SetClosedHandler(fn func()) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.hooks.OnClosed = fn
+}
+
 // Start initializes the runtime connection, JetStream handle, and KV bucket.
 func (m *Manager) Start(ctx context.Context) error {
 	if ctx == nil {

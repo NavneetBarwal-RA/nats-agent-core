@@ -268,6 +268,7 @@ After reconnect, the library must:
 - restore subscriptions
 - restore handler registrations
 - rebuild required NATS/JetStream/KV handles as needed
+- invoke the custom reconnect handler (if registered using `WithReconnectHandler(handler func())`) only after all subscriptions are restored
 
 The library must also support agent recovery flows in which an agent:
 - starts or restarts
@@ -288,6 +289,7 @@ The public API should provide, at minimum, support for:
 - result/status publication
 - desired config store/load/watch
 - handler registration for configure, action, result, and status
+- custom reconnect handler registration via `WithReconnectHandler(handler func())`
 
 The desired-config read API should return the decoded current desired-config record, including the config UUID needed for sync decisions.
 

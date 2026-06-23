@@ -362,6 +362,9 @@ func (c *Client) onSessionReconnected() {
 		return
 	}
 	c.logInfo("subscription restore completed")
+	if c.options.reconnectHandler != nil {
+		c.options.reconnectHandler()
+	}
 }
 
 func (c *Client) onSessionClosed() {

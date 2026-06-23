@@ -76,6 +76,8 @@ Current code includes:
   - `RegisterStatusHandler(...)`
 - optional queue-group subscription option:
   - `WithQueueGroup(...)`
+- optional client constructor options:
+  - `WithReconnectHandler(...)`
 - deferred registration support before `Start(ctx)`
 - configure store-then-notify flow via `SubmitConfigure(...)`
 - direct action publish flow via `SubmitAction(...)`
@@ -222,6 +224,7 @@ The main public APIs currently usable by an owning agent are:
 - `RegisterActionHandler(...)`
 - `RegisterResultHandler(...)`
 - `RegisterStatusHandler(...)`
+- `WithReconnectHandler(...)`
 
 ---
 

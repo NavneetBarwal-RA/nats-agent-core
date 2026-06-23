@@ -745,3 +745,134 @@ func TestStartupReconcileDelegatesToLoadDesiredConfigPath(t *testing.T) {
 		t.Fatalf("expected error op %q, got %q", "key_value", got.Op)
 	}
 }
+
+/*
+TC-CLIENT-011
+Type: Positive
+Title: WithReconnectHandler registers correctly and fires on reconnect
+Summary:
+Verifies that WithReconnectHandler registers the handler in options and invokes
+it when onSessionReconnected runs during connection recovery.
+
+Validates:
+  - constructor accepts WithReconnectHandler option
+  - reconnect handler fires when onSessionReconnected is called with callbacks enabled
+*/
+func TestWithReconnectHandlerOption(t *testing.T) {
+	fired := false
+	handler := func() {
+		fired = true
+	}
+
+	client, err := New(testConfig(), WithReconnectHandler(handler))
+	if err != nil {
+		t.Fatalf("New returned unexpected error: %v", err)
+	}
+
+	if client.options.reconnectHandler == nil {
+		t.Fatal("expected reconnectHandler option to be stored on client")
+	}
+
+	// Enable callbacks to simulate active running state
+	client.callbacksEnabled.Store(true)
+
+	// Invoke the callback triggering onSessionReconnected
+	client.onSessionReconnected()
+
+	if !fired {
+		t.Fatal("expected reconnect handler to be fired")
+	}
+}
+
+/*
+TC-CLIENT-012
+Type: Negative
+Title: Reconnect handler does not fire when callbacks are disabled
+Summary:
+Verifies that the reconnect handler is not invoked if callbacks are disabled.
+
+Validates:
+  - reconnect handler is not fired when callbacksEnabled is false
+*/
+func TestWithReconnectHandler_CallbacksDisabled(t *testing.T) {
+	fired := false
+	handler := func() {
+		fired = true
+	}
+
+	client, err := New(testConfig(), WithReconnectHandler(handler))
+	if err != nil {
+		t.Fatalf("New returned unexpected error: %v", err)
+	}
+
+	// Keep callbacks disabled
+	client.callbacksEnabled.Store(false)
+
+	client.onSessionReconnected()
+
+	if fired {
+		t.Fatal("expected reconnect handler not to fire when callbacks are disabled")
+	}
+}
+
+/*
+TC-CLIENT-013
+Type: Positive
+Title: Reconnect handler is safe to run when nil
+Summary:
+Verifies that the client does not panic when onSessionReconnected is called without a registered reconnect handler.
+
+Validates:
+  - client does not panic when reconnectHandler option is nil (unregistered)
+*/
+func TestWithReconnectHandler_NoHandlerRegistered(t *testing.T) {
+	client, err := New(testConfig())
+	if err != nil {
+		t.Fatalf("New returned unexpected error: %v", err)
+	}
+
+	client.callbacksEnabled.Store(true)
+
+	// Invoke onSessionReconnected without registering a reconnect handler.
+	// This should run without panicking.
+	client.onSessionReconnected()
+}
+
+/*
+TC-CLIENT-014
+Type: Negative
+Title: Reconnect handler does not fire if subscription restore fails
+Summary:
+Verifies that the reconnect handler is not invoked when one or more registered subscriptions fail to restore.
+
+Validates:
+  - reconnect handler is not fired if restoreAllRegisteredSubscriptions returns a non-nil error
+*/
+func TestWithReconnectHandler_SubscriptionRestoreFailed(t *testing.T) {
+	fired := false
+	handler := func() {
+		fired = true
+	}
+
+	client, err := New(testConfig(), WithReconnectHandler(handler))
+	if err != nil {
+		t.Fatalf("New returned unexpected error: %v", err)
+	}
+
+	// Register a configure handler (which creates a subscription record)
+	err = client.RegisterConfigureHandler("vyos", func(context.Context, ConfigureNotification) error { return nil })
+	if err != nil {
+		t.Fatalf("failed to register handler: %v", err)
+	}
+
+	client.callbacksEnabled.Store(true)
+
+	// Since we are not started, client.session lacks an active connection,
+	// so attempting to restore the subscription will return a connection/disconnected error.
+	// This will cause restoreAllRegisteredSubscriptions to return a non-nil error.
+	client.onSessionReconnected()
+
+	if fired {
+		t.Fatal("expected reconnect handler not to fire because subscription restore failed")
+	}
+}

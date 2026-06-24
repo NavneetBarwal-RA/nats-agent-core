@@ -76,6 +76,8 @@ Current code includes:
   - `RegisterStatusHandler(...)`
 - optional queue-group subscription option:
   - `WithQueueGroup(...)`
+- optional client constructor options:
+  - `WithReconnectHandler(...)`
 - deferred registration support before `Start(ctx)`
 - configure store-then-notify flow via `SubmitConfigure(...)`
 - direct action publish flow via `SubmitAction(...)`
@@ -222,6 +224,7 @@ The main public APIs currently usable by an owning agent are:
 - `RegisterActionHandler(...)`
 - `RegisterResultHandler(...)`
 - `RegisterStatusHandler(...)`
+- `WithReconnectHandler(...)`
 
 ---
 
@@ -235,9 +238,9 @@ offloaded by the agent to a goroutine, worker pool, or internal job queue.
 This prevents later messages on the same subscription from being delayed and
 helps avoid backpressure in callback processing.
 
-The library owns subscription registration, callback binding, envelope decoding,
-and reconnect restore. Agents remain responsible for workload execution and
-handler concurrency policy.
+The library recovers from any panics thrown by user configure, action, result, and status handlers (which are caught, logged, and recorded as metrics failures). For the custom reconnect handler, any caught panic is logged and also reported to the registered `errorSink` (if provided) to prevent agent crashes.
+
+The library owns subscription registration, callback binding, envelope decoding, and reconnect restore. Agents remain responsible for workload execution and handler concurrency policy.
 
 ---
 

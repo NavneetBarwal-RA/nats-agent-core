@@ -238,9 +238,9 @@ offloaded by the agent to a goroutine, worker pool, or internal job queue.
 This prevents later messages on the same subscription from being delayed and
 helps avoid backpressure in callback processing.
 
-The library owns subscription registration, callback binding, envelope decoding,
-and reconnect restore. Agents remain responsible for workload execution and
-handler concurrency policy.
+The library recovers from any panics thrown by user handlers (configure, action, result, status) or the custom reconnect handler. These panics are safely caught, logged, and reported to the registered `errorSink` (if provided) to prevent agent crashes.
+
+The library owns subscription registration, callback binding, envelope decoding, and reconnect restore. Agents remain responsible for workload execution and handler concurrency policy.
 
 ---
 

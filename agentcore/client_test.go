@@ -876,3 +876,49 @@ func TestWithReconnectHandler_SubscriptionRestoreFailed(t *testing.T) {
 		t.Fatal("expected reconnect handler not to fire because subscription restore failed")
 	}
 }
+
+/*
+TC-CLIENT-015
+Type: Positive
+Title: Reconnect handler panic is caught and reported to error sink
+Summary:
+Verifies that client recovers gracefully from a panicking reconnect handler,
+preventing application crash and propagating the panic as a formatted error
+to the registered errorSink.
+
+Validates:
+  - client catches panic thrown by reconnect handler
+  - caught panic does not abort execution
+  - formatted error is forwarded to options.errorSink
+*/
+func TestWithReconnectHandlerPanicSafety(t *testing.T) {
+	panicMsg := "simulated database reconnect failure"
+	var caughtErr error
+	sink := func(err error) {
+		caughtErr = err
+	}
+
+	handler := func() {
+		panic(panicMsg)
+	}
+
+	client, err := New(testConfig(), WithReconnectHandler(handler), WithErrorSink(sink))
+	if err != nil {
+		t.Fatalf("New returned unexpected error: %v", err)
+	}
+
+	client.callbacksEnabled.Store(true)
+
+	// Invoke the callback triggering onSessionReconnected
+	// This function must run to completion without panicking.
+	client.onSessionReconnected()
+
+	if caughtErr == nil {
+		t.Fatal("expected panic to be reported to error sink, got nil error")
+	}
+
+	expectedMsg := "reconnect handler panicked: simulated database reconnect failure"
+	if caughtErr.Error() != expectedMsg {
+		t.Fatalf("expected error message %q, got %q", expectedMsg, caughtErr.Error())
+	}
+}

@@ -246,6 +246,7 @@ Checklist:
 - [ ] action/result round-trip integration test exists
 - [ ] reconnect restore is verified with public PublishResult after restart
 - [x] custom reconnect handler option is supported and executed only after subscription restore completes
+- [x] custom reconnect handler recovers from panics and reports them to the errorSink
 
 Commit note:
 - `feat(phase5): add bidirectional send/receive transport and reconnect restoration`

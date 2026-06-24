@@ -308,7 +308,7 @@ The library must **not** implement deep cloud business-policy validation.
 
 Public APIs must return clear, typed errors with structured codes where appropriate.
 
-The library must safely recover from panics thrown in user-supplied callbacks and handlers (such as configure, action, result, status handlers, or the custom reconnect handler). The caught panic must be logged and propagated as an error to the registered `errorSink` without crashing the application.
+The library must safely recover from panics thrown in user-supplied configure, action, result, and status handlers (which are caught, logged, and recorded in metrics as failures) and the custom reconnect handler, preventing application crashes. For session-level connection/reconnection failures and panics originating in the custom reconnect handler callback, errors/panics must also be propagated to the registered `errorSink` (if provided).
 
 ---
 
